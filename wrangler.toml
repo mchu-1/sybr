@@ -4,7 +4,6 @@ main = "index.html"
 [site]
 bucket = "."
 ignore = [
-  "media",
   ".env",
   ".wrangler"
 ]

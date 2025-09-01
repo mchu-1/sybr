@@ -1,5 +1,4 @@
-# Private content (keep media out of version control)
-media/
+# Private content
 .env
 .wrangler/
 
