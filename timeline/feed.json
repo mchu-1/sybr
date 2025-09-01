@@ -19,5 +19,20 @@
     "alt": "Scene of a human at a desktop, from 'Her (2013) - Spike Jonze'",
     "caption": "Her (2013) - Spike Jonze. Theodore Twombly and Samantha, his AI girlfriend.",
     "replyTo": "4016dff275cf"
+  },
+  {
+    "id": "6b8aa9a8c5b2",
+    "type": "text",
+    "content": "Must we work?",
+    "createdAt": "2025-09-01T03:40:25.147775Z"
+  },
+  {
+    "id": "ee3eb78ecd0f",
+    "type": "image",
+    "content": "/media/ee3eb78ecd0f.png",
+    "createdAt": "2025-09-01T03:40:51.010908Z",
+    "alt": "WALL·E at a screen, learning to care",
+    "caption": "Answer: sometimes the work is learning to love.",
+    "replyTo": "6b8aa9a8c5b2"
   }
 ]
