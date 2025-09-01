@@ -1,0 +1,22 @@
+# Private content (keep timeline data and media out of version control)
+timeline/feed.json
+media/
+.env
+.wrangler/
+
+# Node / npm
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Build artifacts (if any)
+dist/
+build/
+
