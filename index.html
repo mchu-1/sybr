@@ -65,6 +65,13 @@
     .date { white-space: nowrap; }
     .content { font-size: 1.05rem; }
     .content img { max-width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); }
+    .content figure { margin: 0; }
+    .content figcaption { color: var(--muted); font-size: 0.95rem; margin-top: 6px; }
+
+    .edited-badge { color: var(--muted); font-size: 0.85rem; }
+    .reply-to { color: var(--muted); font-size: 0.9rem; }
+    .reply-to a { color: var(--accent); text-decoration: none; }
+    .replies { border-left: 2px solid var(--border); margin-left: 14px; padding-left: 12px; display: grid; gap: 12px; }
 
     .visually-hidden { position: absolute !important; height: 1px; width: 1px; overflow: hidden; clip: rect(1px, 1px, 1px, 1px); white-space: nowrap; }
 
@@ -109,7 +116,7 @@
     /**
      * Feed schema (private):
      * [
-     *   { id: string, type: 'text'|'image', content: string, createdAt: ISO8601, alt?: string }
+     *   { id: string, type: 'text'|'image', content: string, createdAt: ISO8601, alt?: string, caption?: string, replyTo?: string, editedAt?: ISO8601 }
      * ]
      */
 
@@ -126,6 +133,8 @@
       const article = document.createElement('article');
       article.className = 'thought';
       article.setAttribute('role', 'article');
+      article.id = 'thought-' + thought.id;
+      article.dataset.id = String(thought.id);
 
       const meta = document.createElement('div');
       meta.className = 'meta';
@@ -139,13 +148,38 @@
       type.setAttribute('aria-label', 'type');
       meta.appendChild(type);
 
+      if (thought.replyTo) {
+        const reply = document.createElement('span');
+        reply.className = 'reply-to';
+        const a = document.createElement('a');
+        a.href = '#thought-' + thought.replyTo;
+        a.textContent = '↳ reply to ' + thought.replyTo;
+        reply.appendChild(a);
+        meta.appendChild(reply);
+      }
+
+      if (thought.editedAt) {
+        const edited = document.createElement('span');
+        edited.className = 'edited-badge';
+        edited.title = 'Edited at ' + thought.editedAt;
+        edited.textContent = '(edited)';
+        meta.appendChild(edited);
+      }
+
       const content = document.createElement('div');
       content.className = 'content';
       if (thought.type === 'image') {
+        const figure = document.createElement('figure');
         const img = document.createElement('img');
         img.src = thought.content;
         img.alt = thought.alt || '';
-        content.appendChild(img);
+        figure.appendChild(img);
+        if (thought.caption) {
+          const cap = document.createElement('figcaption');
+          cap.textContent = thought.caption;
+          figure.appendChild(cap);
+        }
+        content.appendChild(figure);
       } else {
         const p = document.createElement('p');
         p.textContent = thought.content;
@@ -159,10 +193,32 @@
 
     function render(thoughts) {
       timelineRoot.innerHTML = '';
-      const sorted = (thoughts || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      for (const item of sorted) {
-        timelineRoot.appendChild(thoughtToNode(item));
+      const items = Array.isArray(thoughts) ? thoughts.slice() : [];
+      const byId = new Map();
+      const children = new Map();
+      for (const t of items) {
+        byId.set(t.id, t);
+        if (t.replyTo) {
+          if (!children.has(t.replyTo)) children.set(t.replyTo, []);
+          children.get(t.replyTo).push(t);
+        }
       }
+      const roots = items.filter(t => !t.replyTo || !byId.has(t.replyTo));
+      roots.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      function renderThread(t, container) {
+        const node = thoughtToNode(t);
+        container.appendChild(node);
+        const kids = (children.get(t.id) || []).slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        if (kids.length) {
+          const replies = document.createElement('div');
+          replies.className = 'replies';
+          for (const k of kids) renderThread(k, replies);
+          container.appendChild(replies);
+        }
+      }
+
+      for (const r of roots) renderThread(r, timelineRoot);
       timelineRoot.setAttribute('aria-busy', 'false');
     }
 
