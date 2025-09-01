@@ -1,5 +1,4 @@
-# Private content (keep timeline data and media out of version control)
-timeline/feed.json
+# Private content (keep media out of version control)
 media/
 .env
 .wrangler/
