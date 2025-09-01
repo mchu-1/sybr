@@ -1,0 +1,25 @@
+models:
+  - id: gpt-5-high
+    provider: openai
+    enabled: true
+    env_var: OPENAI_API_KEY
+
+  - id: grok-4
+    provider: xai
+    enabled: true
+    env_var: XAI_API_KEY
+
+  - id: gemini/gemini-2.5-pro
+    provider: google
+    enabled: true
+    env_var: GEMINI_API_KEY
+
+  - id: deepseek/deepseek-v3.1-reasoning
+    provider: deepseek
+    enabled: true
+    env_var: DEEPSEEK_API_KEY
+
+  - id: llama/llama-4-maverick
+    provider: llama
+    enabled: true
+    env_var: LLAMA_API_KEY
