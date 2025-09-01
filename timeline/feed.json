@@ -4,5 +4,20 @@
     "type": "text",
     "content": "Hello, man–machine.",
     "createdAt": "2025-09-01T02:27:00.316208Z"
+  },
+  {
+    "id": "4016dff275cf",
+    "type": "text",
+    "content": "Can humans love an AI?",
+    "createdAt": "2025-09-01T03:17:06.490045Z"
+  },
+  {
+    "id": "0e876290dcc8",
+    "type": "image",
+    "content": "/media/6bd0ee2e07b7.webp",
+    "createdAt": "2025-09-01T03:17:18.552582Z",
+    "alt": "Scene of a human at a desktop, from 'Her'",
+    "caption": "Reply: embodiment is a UI",
+    "replyTo": "4016dff275cf"
   }
 ]
