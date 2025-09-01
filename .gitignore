@@ -1,6 +1,7 @@
 # Private content
 .env
 .wrangler/
+instructions.md
 
 # Node / npm
 node_modules/
