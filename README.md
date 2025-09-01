@@ -1,12 +1,11 @@
 # Debate Arena
-
 A multi-turn debate API between two frontier models.
 
 ## Features
-- Randomly assigns sides: affirmative vs negative
-- Two different LLMs are selected
-- Each model sees the full conversation history before responding
-- 280-character responses enforced via `max_tokens` approximation
+1. Randomly assigns sides: affirmative vs negative
+2. Two different LLMs are selected
+3. Each model sees the full conversation history before responding
+4. 280-character responses enforced via `max_tokens` approximation
 
 ## Requirements
 - Python 3.10+
@@ -48,7 +47,6 @@ Response (array of turns):
 ```
 
 ### Model selection
-The app selects models from `models.yaml` by default.
 - If two or more models are enabled, two distinct models are chosen at random.
 - If exactly one model is enabled, it will debate itself.
 - You may still pass `models` in the request body to override.
