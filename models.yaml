@@ -18,8 +18,3 @@ models:
     provider: deepseek
     enabled: true
     env_var: DEEPSEEK_API_KEY
-
-  - id: llama/llama-4-maverick
-    provider: llama
-    enabled: true
-    env_var: LLAMA_API_KEY
