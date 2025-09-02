@@ -37,6 +37,7 @@ max_output: int = int(APP_CONFIG["max_output"])
 max_input: int = int(APP_CONFIG.get("max_input", 64))
 max_time: int = int(APP_CONFIG.get("max_time", 15))
 approx_chars_per_token: int = 4
+RESPONSE_CHAR_LIMIT: int = 280
 
 def _get_system_template() -> Template:
     """Load system prompt template."""
@@ -116,7 +117,7 @@ async def _model_reply(
     model_name: str,
     question: str,
 ) -> ForumPost:
-    soft_max_chars = _approximate_max_characters_from_output_tokens(max_output)
+    soft_max_chars = RESPONSE_CHAR_LIMIT
     system = _system_prompt(question=question, soft_max_chars=soft_max_chars)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
