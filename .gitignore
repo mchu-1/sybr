@@ -5,3 +5,4 @@ pyproject.toml
 .env
 test.py
 response.json
+wrangler.toml
