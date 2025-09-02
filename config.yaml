@@ -1,5 +1,5 @@
 # Token budgets
-max_tokens: 1000
+max_tokens: 10000
 max_chars: 280
 max_input: 64
-max_time: 10
+max_time: 60

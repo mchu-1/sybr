@@ -9,6 +9,11 @@ models:
     enabled: true
     env_var: XAI_API_KEY
 
+  - id: gemini/gemini-2.5-pro
+    provider: google
+    enabled: true
+    env_var: GEMINI_API_KEY
+
   - id: deepseek-reasoner
     provider: deepseek
     enabled: true
