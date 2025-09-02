@@ -4,5 +4,4 @@ uvicorn.log
 pyproject.toml
 .env
 test.py
-data/
 response.json
