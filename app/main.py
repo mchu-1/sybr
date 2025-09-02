@@ -1,12 +1,15 @@
 import uuid
+import asyncio
 
 from typing import List, Dict, Any
+from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel, Field
 from string import Template
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+# from os import getenv
 
 from litellm import acompletion
 import yaml
@@ -31,8 +34,6 @@ max_characters: int = int(APP_CONFIG["max_characters"])
 max_completion_tokens: int = int(APP_CONFIG["max_completion_tokens"])
 max_input_tokens: int = int(APP_CONFIG.get("max_input_tokens", 64))
 max_reasoning_tokens: int = int(APP_CONFIG.get("max_reasoning_tokens", 10000))
-temperature: float = float(APP_CONFIG["temperature"])
-top_p: float = float(APP_CONFIG["top_p"])
 
 def _get_system_template() -> Template:
     """Load system prompt template."""
@@ -65,21 +66,26 @@ class ForumCreateRequest(BaseModel):
     models: List[str] = Field(..., min_items=1, description="List of model IDs to participate")
 
 class ForumPost(BaseModel):
-    turn: int
     model: str
     message: str
 
-class ForumThread(BaseModel):
+class Forum(BaseModel):
     id: str
     question: str
     models: List[str]
     transcript: List[ForumPost]
+    status: str
 
 app = FastAPI(title="Forum API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -109,32 +115,23 @@ def _truncate_question_to_input_budget(question: str) -> str:
         return q
     return q[:char_budget].rstrip()
 
+
+
 async def _model_reply(
     model_name: str,
     question: str,
-    history_messages: List[Dict[str, str]],
 ) -> str:
     system = _system_prompt(question=question)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
-    messages.extend(history_messages)
-
-    # Best-effort reasoning token support via passthrough
-    extra_body = {
-        "reasoning": {
-            "effort": "medium",
-            "tokens": max_reasoning_tokens,
-            "budget_tokens": max_reasoning_tokens,
-        }
-    }
 
     response = await acompletion(
         model=model_name,
         messages=messages,
+        # Provide both for compatibility across providers/wrappers
+        max_tokens=max_completion_tokens,
         max_completion_tokens=max_completion_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        extra_body=extra_body,
+        # sampling params removed per request
     )
     content = (
         (response.get("choices") or [{}])[0]
@@ -146,16 +143,71 @@ async def _model_reply(
         content = content[:max_characters].rstrip()
     return content
 
-# In-memory store for forum threads
-FORUM_THREADS: Dict[str, ForumThread] = {}
+# In-memory store for forums
+FORUMS: Dict[str, Forum] = {}
+FORUMS_LOCK = asyncio.Lock()
+
+## Public API: no auth
 
 # --- Endpoints ---
-@app.post("/forums", response_model=ForumThread)
-async def create_forum_thread(req: ForumCreateRequest) -> ForumThread:
+async def _generate_forum_transcript(
+    forum_id: str,
+    question: str,
+    model_names: List[str],
+) -> None:
+    transcript: List[ForumPost] = []
+    try:
+        # Run all model calls concurrently
+        tasks = [
+            _model_reply(model_name=m, question=question)
+            for m in model_names
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for model_name, result in zip(model_names, results):
+            if isinstance(result, Exception):
+                message = f"[error] {type(result).__name__}: {str(result)}"
+            else:
+                message = result or ""
+            transcript.append(ForumPost(model=model_name, message=message))
+
+        async with FORUMS_LOCK:
+            forum = FORUMS.get(forum_id)
+            if forum is not None:
+                forum.transcript = transcript
+                forum.status = "complete"
+    except Exception as e:
+        async with FORUMS_LOCK:
+            forum = FORUMS.get(forum_id)
+            if forum is not None:
+                forum.transcript = transcript
+                forum.status = "error"
+
+
+@app.post("/forum", response_model=Forum)
+async def create_forum(
+    req: ForumCreateRequest,
+) -> Forum:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
 
     # Validate requested models exist and are enabled
+    enabled_models_list = _load_models_from_yaml()
+    max_selectable = len(enabled_models_list)
+
+    # Pre-check: ensure requested unique count does not exceed available models
+    requested_unique = set()
+    for m in req.models:
+        if isinstance(m, str) and m.strip():
+            requested_unique.add(m.strip())
+    if max_selectable == 0:
+        raise HTTPException(status_code=400, detail="No models are available to select")
+    if len(requested_unique) > max_selectable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You can select up to {max_selectable} models",
+        )
+
     unique_models = []
     seen = set()
     for m in req.models:
@@ -170,47 +222,40 @@ async def create_forum_thread(req: ForumCreateRequest) -> ForumThread:
     if not unique_models:
         raise HTTPException(status_code=400, detail="No valid models provided")
 
-    # Shared conversation history across all models
-    history_messages: List[Dict[str, str]] = []
+    # Independent responses: no shared history
     transcript: List[ForumPost] = []
 
     # Enforce small input budget
     bounded_question = _truncate_question_to_input_budget(req.question)
 
-    # Single pass: each model replies once
-    turn_index = 1
-    for model_name in unique_models:
-        reply = await _model_reply(
-            model_name=model_name,
-            question=bounded_question,
-            history_messages=history_messages,
-        )
-        history_messages.append({"role": "assistant", "content": reply})
-        transcript.append(
-            ForumPost(
-                turn=turn_index,
-                model=model_name,
-                message=reply,
-            )
-        )
-
-    thread_id = str(uuid.uuid4())
-    thread = ForumThread(
-        id=thread_id,
+    forum_id = str(uuid.uuid4())
+    forum = Forum(
+        id=forum_id,
         question=bounded_question,
         models=unique_models,
         transcript=transcript,
+        status="pending",
     )
 
-    FORUM_THREADS[thread_id] = thread
-    return thread
+    async with FORUMS_LOCK:
+        FORUMS[forum_id] = forum
 
-@app.get("/forums/{thread_id}", response_model=ForumThread)
-async def get_forum_thread(thread_id: str) -> ForumThread:
-    thread = FORUM_THREADS.get(thread_id)
-    if thread is None:
-        raise HTTPException(status_code=404, detail="Forum thread not found")
-    return thread
+    # Kick off background generation and return immediately
+    asyncio.create_task(
+        _generate_forum_transcript(
+            forum_id=forum_id,
+            question=bounded_question,
+            model_names=unique_models,
+        )
+    )
+    return forum
+
+@app.get("/forum/{forum_id}", response_model=Forum)
+async def get_forum(forum_id: str) -> Forum:
+    forum = FORUMS.get(forum_id)
+    if forum is None:
+        raise HTTPException(status_code=404, detail="Forum not found")
+    return forum
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:

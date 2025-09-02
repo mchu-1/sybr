@@ -3,7 +3,3 @@ max_characters: 280
 max_completion_tokens: 256
 max_input_tokens: 64
 max_reasoning_tokens: 10000
-
-# Sampling hyperparameters
-temperature: 0.7
-top_p: 0.9
