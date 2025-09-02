@@ -29,6 +29,7 @@ TEMPLATES_DIR: Path = APP_DIR / "templates"
 DATA_DIR: Path = PROJECT_ROOT / "data"
 FORUMS_DIR: Path = DATA_DIR
 FORUMS_DIR.mkdir(parents=True, exist_ok=True)
+CONVERSATIONS_JSONL: Path = DATA_DIR / "conversations.jsonl"
 
 def _load_app_config() -> Dict[str, Any]:
     config_path = PROJECT_ROOT / "config.yaml"
@@ -51,6 +52,73 @@ def _get_system_template() -> Template:
     """Load system prompt template."""
     template_text = (PROJECT_ROOT / "system.md").read_text(encoding="utf-8")
     return Template(template_text)
+
+def _ensure_conversations_file() -> None:
+    try:
+        if not CONVERSATIONS_JSONL.exists():
+            CONVERSATIONS_JSONL.touch()
+    except Exception:
+        pass
+
+def _append_conversation_jsonl(record: Dict[str, Any]) -> None:
+    try:
+        with CONVERSATIONS_JSONL.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _load_conversation_ids() -> set:
+    ids: set = set()
+    if not CONVERSATIONS_JSONL.exists():
+        return ids
+    try:
+        with CONVERSATIONS_JSONL.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    cid = obj.get("id")
+                    if isinstance(cid, str):
+                        ids.add(cid)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return ids
+
+def _migrate_forums_to_jsonl() -> None:
+    try:
+        existing_ids = _load_conversation_ids()
+        for path in FORUMS_DIR.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            conv_id = data.get("id") or str(uuid.uuid4())
+            if conv_id in existing_ids:
+                continue
+            question = (data.get("question") or "").strip()
+            transcript = data.get("transcript") or []
+            answers: List[Dict[str, Any]] = []
+            if isinstance(transcript, list):
+                for item in transcript:
+                    if isinstance(item, dict):
+                        answers.append({
+                            "model": str(item.get("model") or ""),
+                            "ts": str(item.get("ts") or _now_iso()),
+                            "response": str(item.get("message") or ""),
+                        })
+            record: Dict[str, Any] = {
+                "id": conv_id,
+                "question": question,
+                "answers": answers,
+                "status": str(data.get("status") or "complete"),
+            }
+            _append_conversation_jsonl(record)
+    except Exception:
+        pass
 
 # --- Data models ---
 class PostStatus(str, Enum):
@@ -196,7 +264,7 @@ async def _model_reply(
         return ForumPost(model=model_name, message=truncated, status=PostStatus.fail, ts=_now_iso())
     return ForumPost(model=model_name, message=content, status=PostStatus.success, ts=_now_iso())
 
-# In-memory store for forums
+# In-memory store for forums (still used for in-flight generation)
 FORUMS: Dict[str, Forum] = {}
 FORUMS_LOCK = asyncio.Lock()
 
@@ -363,102 +431,47 @@ async def _generate_forum_transcript(
                 # result is already a ForumPost
                 transcript.append(result)
 
+        # Persist final conversation into JSONL
+        record: Dict[str, Any] = {
+            "id": forum_id,
+            "question": question,
+            "answers": [
+                {
+                    "model": p.model,
+                    "ts": p.ts,
+                    "response": p.message,
+                }
+                for p in transcript
+            ],
+            "status": str(ForumStatus.complete),
+        }
+        _append_conversation_jsonl(record)
         async with FORUMS_LOCK:
             forum = FORUMS.get(forum_id)
             if forum is not None:
                 forum.transcript = transcript
                 forum.status = ForumStatus.complete
-                _save_forum_to_disk(forum)
     except Exception as e:
         async with FORUMS_LOCK:
             forum = FORUMS.get(forum_id)
             if forum is not None:
                 forum.transcript = transcript
                 forum.status = ForumStatus.error
-                _save_forum_to_disk(forum)
 
-@app.post("/forum", response_model=ForumCreateResponse)
-async def create_forum(
-    req: ForumCreateRequest,
-) -> ForumCreateResponse:
-    if not req.question or not req.question.strip():
-        raise HTTPException(status_code=400, detail="Question is required")
-
-    # Pass through requested models directly; assume they are valid and unique
-    selected_models = req.models
-
-    # Independent responses: show placeholders immediately
-    transcript: List[ForumPost] = [
-        ForumPost(model=m, message="[pending]", status=PostStatus.thinking) for m in selected_models
-    ]
-
-    # Enforce small input budget
-    bounded_question = _truncate_question_to_input_budget(req.question)
-
-    forum_id = str(uuid.uuid4())
-    forum = Forum(
-        id=forum_id,
-        question=bounded_question,
-        models=selected_models,
-        transcript=transcript,
-        status=ForumStatus.pending,
-    )
-
-    async with FORUMS_LOCK:
-        FORUMS[forum_id] = forum
-        _save_forum_to_disk(forum)
-
-    # Kick off background generation and return immediately
-    asyncio.create_task(
-        _generate_forum_transcript(
-            forum_id=forum_id,
-            question=bounded_question,
-            model_names=selected_models,
-        )
-    )
-    return ForumCreateResponse(id=forum_id)
-
-@app.get("/forum/{forum_id}", response_model=ForumDetailResponse)
-async def get_forum(forum_id: str) -> ForumDetailResponse:
-    forum = FORUMS.get(forum_id)
-    if forum is None:
-        loaded = _load_forum_from_disk(forum_id)
-        if loaded is not None:
-            async with FORUMS_LOCK:
-                FORUMS[forum_id] = loaded
-            return _to_detail_response(loaded)
-        raise HTTPException(status_code=404, detail="Forum not found")
-    return _to_detail_response(forum)
-
-@app.get("/health")
-async def health() -> Dict[str, Any]:
-    return {"status": "ok"}
-
-# --- UI (HTMX) endpoints ---
-
-@app.get("/", response_class=HTMLResponse)
-async def ui_index() -> HTMLResponse:
-    return HTMLResponse(content=_render_index_html())
-
-@app.get("/ui/models", response_class=HTMLResponse)
-async def ui_models() -> HTMLResponse:
-    return HTMLResponse(content=_render_models_checkboxes(_load_enabled_models()))
-
-@app.post("/ui/forum", response_class=HTMLResponse)
-async def ui_create_forum(request: Request) -> HTMLResponse:
-    form = await request.form()
+@app.post("/forum", response_class=HTMLResponse)
+async def create_forum(req: Request) -> HTMLResponse:
+    form = await req.form()
     question = (form.get("question") or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
-    # models may be a list or a single value
     raw_models = form.getlist("models") if hasattr(form, "getlist") else []
     selected_models = [m for m in raw_models if isinstance(m, str) and m.strip()]
     if not selected_models:
         selected_models = _load_enabled_models()
-    forum = _create_forum_internal(question=question, selected_models=selected_models)
+    bounded_question = _truncate_question_to_input_budget(question)
+    forum = _create_forum_internal(question=bounded_question, selected_models=selected_models)
     async with FORUMS_LOCK:
         FORUMS[forum.id] = forum
-        _save_forum_to_disk(forum)
     asyncio.create_task(
         _generate_forum_transcript(
             forum_id=forum.id,
@@ -468,53 +481,17 @@ async def ui_create_forum(request: Request) -> HTMLResponse:
     )
     return HTMLResponse(content=_render_forum_card(forum))
 
-@app.get("/ui/forum/{forum_id}", response_class=HTMLResponse)
-async def ui_forum_card(forum_id: str) -> HTMLResponse:
-    forum = _get_forum_by_id(forum_id)
-    return HTMLResponse(content=_render_forum_card(forum))
+@app.get("/forum", response_class=HTMLResponse)
+async def get_forum_page() -> HTMLResponse:
+    # Ensure store and perform one-time migration
+    _ensure_conversations_file()
+    _migrate_forums_to_jsonl()
+    return HTMLResponse(content=_render_index_html())
 
-@app.get("/ui/forum/{forum_id}/post/{model_id:path}", response_class=HTMLResponse)
-async def ui_post_view(forum_id: str, model_id: str) -> HTMLResponse:
-    forum = _get_forum_by_id(forum_id)
-    for p in forum.transcript:
-        if p.model == model_id:
-            return HTMLResponse(content=_render_post(forum_id, p))
-    raise HTTPException(status_code=404, detail="Post not found")
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    return {"status": "ok"}
 
-@app.get("/ui/forum/{forum_id}/post/{model_id:path}/edit", response_class=HTMLResponse)
-async def ui_post_edit(forum_id: str, model_id: str) -> HTMLResponse:
-    forum = _get_forum_by_id(forum_id)
-    for p in forum.transcript:
-        if p.model == model_id:
-            return HTMLResponse(content=_render_post_edit(forum_id, p))
-    raise HTTPException(status_code=404, detail="Post not found")
-
-@app.post("/ui/forum/{forum_id}/post/{model_id:path}/update", response_class=HTMLResponse)
-async def ui_post_update(forum_id: str, model_id: str, request: Request) -> HTMLResponse:
-    form = await request.form()
-    new_msg = (form.get("message") or "").strip()
-    if not new_msg:
-        raise HTTPException(status_code=400, detail="Message is required")
-    async with FORUMS_LOCK:
-        forum = FORUMS.get(forum_id)
-        if forum is None:
-            forum = _load_forum_from_disk(forum_id)
-            if forum is None:
-                raise HTTPException(status_code=404, detail="Forum not found")
-        updated = False
-        for idx, p in enumerate(forum.transcript):
-            if p.model == model_id:
-                forum.transcript[idx] = ForumPost(model=p.model, message=new_msg, status=PostStatus.success, ts=_now_iso())
-                updated = True
-                break
-        if not updated:
-            # If the model wasn't present, add it as a new post
-            forum.transcript.append(ForumPost(model=model_id, message=new_msg, status=PostStatus.success, ts=_now_iso()))
-        forum.status = forum.status  # no change
-        _save_forum_to_disk(forum)
-        FORUMS[forum_id] = forum
-        # Return the updated single post view
-        for p in forum.transcript:
-            if p.model == model_id:
-                return HTMLResponse(content=_render_post(forum_id, p))
-    raise HTTPException(status_code=500, detail="Failed to update post")
+@app.get("/", response_class=HTMLResponse)
+async def root_redirect() -> HTMLResponse:
+    return HTMLResponse(content=_render_index_html())
