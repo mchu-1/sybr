@@ -1,4 +1,4 @@
-import random
+import uuid
 
 from typing import List, Optional, Literal, Dict, Any
 from pathlib import Path
@@ -61,9 +61,13 @@ def _load_models_from_yaml() -> List[str]:
         return []
 
 # --- Data models ---
-class DebateRequest(BaseModel):
+class ModelAssignments(BaseModel):
+    affirmative: str = Field(..., min_length=1)
+    negative: str = Field(..., min_length=1)
+
+class DebateCreateRequest(BaseModel):
     question: str = Field(..., min_length=3)
-    models: Optional[List[str]] = None
+    models: ModelAssignments
     turns: int = Field(
         default_turns,
         ge=1,
@@ -71,13 +75,19 @@ class DebateRequest(BaseModel):
     )
 
 class DebateTurn(BaseModel):
-    question: str
     turn: int
     side: Side
     model: str
     message: str
 
-app = FastAPI(title="Debate API", version="0.1.0")
+class Debate(BaseModel):
+    id: str
+    question: str
+    affirmative: str
+    negative: str
+    transcript: List[DebateTurn]
+
+app = FastAPI(title="Debate API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,22 +98,12 @@ app.add_middleware(
 )
 
 # --- Helper functions ---
-def _select_two_models(_: Optional[List[str]]) -> List[str]:
-    # Always select from models.yaml. If exactly one model, it debates itself.
-    yaml_models = _load_models_from_yaml()
-    if len(yaml_models) >= 2:
-        return random.sample(yaml_models, 2)
-    if len(yaml_models) == 1:
-        return [yaml_models[0], yaml_models[0]]
-
-    raise HTTPException(status_code=400, detail=(
-        "No models available. Enable at least one model in models.yaml."
-    ))
-
-def _assign_sides() -> Dict[str, Side]:
-    sides: List[Side] = ["affirmative", "negative"]
-    random.shuffle(sides)
-    return {"speaker_a": sides[0], "speaker_b": sides[1]}
+def _validate_model_enabled(model_id: str) -> None:
+    enabled_models = set(_load_models_from_yaml())
+    if model_id not in enabled_models:
+        raise HTTPException(status_code=400, detail=(
+            f"Model '{model_id}' is not enabled or not found in models.yaml."
+        ))
 
 def _system_prompt(side: Side, question: str) -> str:
     template = _get_system_template()
@@ -141,59 +141,77 @@ async def _model_reply(
         content = content[:max_characters].rstrip()
     return content
 
+# In-memory store for debates
+DEBATES: Dict[str, Debate] = {}
+
 # --- Endpoints ---
-@app.post("/debate", response_model=List[DebateTurn])
-async def debate(req: DebateRequest) -> List[DebateTurn]:
+@app.post("/debates", response_model=Debate)
+async def create_debate(req: DebateCreateRequest) -> Debate:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
 
-    model_a, model_b = _select_two_models(req.models)
-    sides_map = _assign_sides()  # speaker_a / speaker_b → side
+    # Validate requested models exist and are enabled
+    _validate_model_enabled(req.models.affirmative)
+    _validate_model_enabled(req.models.negative)
 
     # Conversation history shared across both models
     history_messages: List[Dict[str, str]] = []
     transcript: List[DebateTurn] = []
 
+    # Alternate sides deterministically: affirmative then negative per turn
     for turn_index in range(1, req.turns + 1):
-        # Speaker A
-        side_a: Side = sides_map["speaker_a"]
-        reply_a = await _model_reply(
-            model_name=model_a,
-            side=side_a,
+        # Affirmative speaks first
+        reply_affirmative = await _model_reply(
+            model_name=req.models.affirmative,
+            side="affirmative",
             question=req.question.strip(),
             history_messages=history_messages,
         )
-        history_messages.append({"role": "assistant", "content": reply_a})
+        history_messages.append({"role": "assistant", "content": reply_affirmative})
         transcript.append(
             DebateTurn(
-                question=req.question.strip(),
                 turn=turn_index,
-                side=side_a,
-                model=model_a,
-                message=reply_a,
+                side="affirmative",
+                model=req.models.affirmative,
+                message=reply_affirmative,
             )
         )
 
-        # Speaker B (sees A's reply in history)
-        side_b: Side = sides_map["speaker_b"]
-        reply_b = await _model_reply(
-            model_name=model_b,
-            side=side_b,
+        # Negative responds, seeing the history including affirmative's reply
+        reply_negative = await _model_reply(
+            model_name=req.models.negative,
+            side="negative",
             question=req.question.strip(),
             history_messages=history_messages,
         )
-        history_messages.append({"role": "assistant", "content": reply_b})
+        history_messages.append({"role": "assistant", "content": reply_negative})
         transcript.append(
             DebateTurn(
-                question=req.question.strip(),
                 turn=turn_index,
-                side=side_b,
-                model=model_b,
-                message=reply_b,
+                side="negative",
+                model=req.models.negative,
+                message=reply_negative,
             )
         )
 
-    return transcript
+    debate_id = str(uuid.uuid4())
+    debate = Debate(
+        id=debate_id,
+        question=req.question.strip(),
+        affirmative=req.models.affirmative,
+        negative=req.models.negative,
+        transcript=transcript,
+    )
+
+    DEBATES[debate_id] = debate
+    return debate
+
+@app.get("/debates/{debate_id}", response_model=Debate)
+async def get_debate(debate_id: str) -> Debate:
+    debate = DEBATES.get(debate_id)
+    if debate is None:
+        raise HTTPException(status_code=404, detail="Debate not found")
+    return debate
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:

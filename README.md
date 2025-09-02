@@ -1,11 +1,11 @@
 # Debate Arena
-A multi-turn debate API between two frontier models.
+A multi-turn debate API between two models with deterministic side assignments.
 
 ## Features
-1. Randomly assigns sides: affirmative vs negative
-2. Two different LLMs are selected
-3. Each model sees the full conversation history before responding
-4. 280-character responses enforced via `max_tokens` approximation
+1. Deterministic sides: user selects models for affirmative and negative
+2. Each model sees the full conversation history before responding
+3. 280-character responses enforced via `max_tokens` approximation
+4. Debates are stored in-memory and retrievable by UUID for the session
 
 ## Requirements
 - Python 3.10+
@@ -16,43 +16,53 @@ A multi-turn debate API between two frontier models.
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-## Endpoint: POST /debate
+## Endpoint: POST /debates
 Request body:
 ```json
 {
   "question": "Should governments ban TikTok?",
-  "models": ["gpt-5-high", "grok-4"],
+  "models": {
+    "affirmative": "gpt-5-high",
+    "negative": "grok-4"
+  },
   "turns": 2
 }
 ```
 
-Response (array of turns):
+Response (Debate object):
 ```json
-[
-  {
-    "question": "Should governments ban TikTok?",
-    "turn": 1,
-    "side": "affirmative",
-    "model": "gpt-5-high",
-    "message": "...280 chars max..."
-  },
-  {
-    "question": "Should governments ban TikTok?",
-    "turn": 1,
-    "side": "negative",
-    "model": "grok-4",
-    "message": "...280 chars max..."
-  }
-]
+{
+  "id": "c2c5d57b-5b3f-4bd9-a9f3-7f9f6b8b4a8e",
+  "question": "Should governments ban TikTok?",
+  "affirmative": "gpt-5-high",
+  "negative": "grok-4",
+  "transcript": [
+    {
+      "turn": 1,
+      "side": "affirmative",
+      "model": "gpt-5-high",
+      "message": "...280 chars max..."
+    },
+    {
+      "turn": 1,
+      "side": "negative",
+      "model": "grok-4",
+      "message": "...280 chars max..."
+    }
+  ]
+}
 ```
 
 ### Model selection
-- If two or more models are enabled, two distinct models are chosen at random.
-- If exactly one model is enabled, it will debate itself.
-- You may still pass `models` in the request body to override.
+- You must provide model IDs for both `affirmative` and `negative`.
+- Model IDs must be enabled in `models.yaml`.
+- You may use the same model for both sides.
 
 ### Conversation
 Hyperparameters live in `config.yaml`.
+
+## Endpoint: GET /debates/{id}
+Returns the stored Debate object for the given UUID. In-memory only for the life of the process.
 
 ### Model configuration
 Models are listed in `models.yaml`.
