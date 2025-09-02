@@ -1,6 +1,6 @@
 import uuid
 
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Dict, Any
 from pathlib import Path
 from pydantic import BaseModel, Field
 from string import Template
@@ -11,8 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from litellm import acompletion
 import yaml
 from dotenv import load_dotenv
-
-Side = Literal["affirmative", "negative"]
 
 # --- Configuration ---
 load_dotenv()  # Load API keys from .env into environment
@@ -32,6 +30,8 @@ APP_CONFIG: Dict[str, Any] = _load_app_config()
 default_turns: int = int(APP_CONFIG["default_turns"])
 max_characters: int = int(APP_CONFIG["max_characters"])
 max_completion_tokens: int = int(APP_CONFIG["max_completion_tokens"])
+max_input_tokens: int = int(APP_CONFIG.get("max_input_tokens", 64))
+max_reasoning_tokens: int = int(APP_CONFIG.get("max_reasoning_tokens", 10000))
 temperature: float = float(APP_CONFIG["temperature"])
 top_p: float = float(APP_CONFIG["top_p"])
 
@@ -61,33 +61,27 @@ def _load_models_from_yaml() -> List[str]:
         return []
 
 # --- Data models ---
-class ModelAssignments(BaseModel):
-    affirmative: str = Field(..., min_length=1)
-    negative: str = Field(..., min_length=1)
-
-class DebateCreateRequest(BaseModel):
+class ForumCreateRequest(BaseModel):
     question: str = Field(..., min_length=3)
-    models: ModelAssignments
+    models: List[str] = Field(..., min_items=1, description="List of model IDs to participate")
     turns: int = Field(
         default_turns,
         ge=1,
-        description="Number of turns per side",
+        description="Number of messages per model",
     )
 
-class DebateTurn(BaseModel):
+class ForumPost(BaseModel):
     turn: int
-    side: Side
     model: str
     message: str
 
-class Debate(BaseModel):
+class ForumThread(BaseModel):
     id: str
     question: str
-    affirmative: str
-    negative: str
-    transcript: List[DebateTurn]
+    models: List[str]
+    transcript: List[ForumPost]
 
-app = FastAPI(title="Debate API", version="0.2.0")
+app = FastAPI(title="Forum API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -105,24 +99,40 @@ def _validate_model_enabled(model_id: str) -> None:
             f"Model '{model_id}' is not enabled or not found in models.yaml."
         ))
 
-def _system_prompt(side: Side, question: str) -> str:
+def _system_prompt(question: str) -> str:
     template = _get_system_template()
     return template.safe_substitute(
-        SIDE=side.upper(),
         QUESTION=question,
         MAX_CHARACTERS=str(max_characters),
     )
 
+def _truncate_question_to_input_budget(question: str) -> str:
+    # Approximate tokens as chars/4 and limit accordingly
+    approx_chars_per_token = 4
+    char_budget = max(1, max_input_tokens * approx_chars_per_token)
+    q = (question or "").strip()
+    if len(q) <= char_budget:
+        return q
+    return q[:char_budget].rstrip()
+
 async def _model_reply(
     model_name: str,
-    side: Side,
     question: str,
     history_messages: List[Dict[str, str]],
 ) -> str:
-    system = _system_prompt(side=side, question=question)
+    system = _system_prompt(question=question)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
     messages.extend(history_messages)
+
+    # Best-effort reasoning token support via passthrough
+    extra_body = {
+        "reasoning": {
+            "effort": "medium",
+            "tokens": max_reasoning_tokens,
+            "budget_tokens": max_reasoning_tokens,
+        }
+    }
 
     response = await acompletion(
         model=model_name,
@@ -130,6 +140,7 @@ async def _model_reply(
         max_completion_tokens=max_completion_tokens,
         temperature=temperature,
         top_p=top_p,
+        extra_body=extra_body,
     )
     content = (
         (response.get("choices") or [{}])[0]
@@ -141,77 +152,71 @@ async def _model_reply(
         content = content[:max_characters].rstrip()
     return content
 
-# In-memory store for debates
-DEBATES: Dict[str, Debate] = {}
+# In-memory store for forum threads
+FORUM_THREADS: Dict[str, ForumThread] = {}
 
 # --- Endpoints ---
-@app.post("/debates", response_model=Debate)
-async def create_debate(req: DebateCreateRequest) -> Debate:
+@app.post("/forums", response_model=ForumThread)
+async def create_forum_thread(req: ForumCreateRequest) -> ForumThread:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
 
     # Validate requested models exist and are enabled
-    _validate_model_enabled(req.models.affirmative)
-    _validate_model_enabled(req.models.negative)
+    unique_models = []
+    seen = set()
+    for m in req.models:
+        if not isinstance(m, str) or not m.strip():
+            continue
+        mid = m.strip()
+        if mid in seen:
+            continue
+        _validate_model_enabled(mid)
+        seen.add(mid)
+        unique_models.append(mid)
+    if not unique_models:
+        raise HTTPException(status_code=400, detail="No valid models provided")
 
-    # Conversation history shared across both models
+    # Shared conversation history across all models
     history_messages: List[Dict[str, str]] = []
-    transcript: List[DebateTurn] = []
+    transcript: List[ForumPost] = []
 
-    # Alternate sides deterministically: affirmative then negative per turn
+    # Enforce small input budget
+    bounded_question = _truncate_question_to_input_budget(req.question)
+
+    # Round-robin k turns per model
     for turn_index in range(1, req.turns + 1):
-        # Affirmative speaks first
-        reply_affirmative = await _model_reply(
-            model_name=req.models.affirmative,
-            side="affirmative",
-            question=req.question.strip(),
-            history_messages=history_messages,
-        )
-        history_messages.append({"role": "assistant", "content": reply_affirmative})
-        transcript.append(
-            DebateTurn(
-                turn=turn_index,
-                side="affirmative",
-                model=req.models.affirmative,
-                message=reply_affirmative,
+        for model_name in unique_models:
+            reply = await _model_reply(
+                model_name=model_name,
+                question=bounded_question,
+                history_messages=history_messages,
             )
-        )
-
-        # Negative responds, seeing the history including affirmative's reply
-        reply_negative = await _model_reply(
-            model_name=req.models.negative,
-            side="negative",
-            question=req.question.strip(),
-            history_messages=history_messages,
-        )
-        history_messages.append({"role": "assistant", "content": reply_negative})
-        transcript.append(
-            DebateTurn(
-                turn=turn_index,
-                side="negative",
-                model=req.models.negative,
-                message=reply_negative,
+            history_messages.append({"role": "assistant", "content": reply})
+            transcript.append(
+                ForumPost(
+                    turn=turn_index,
+                    model=model_name,
+                    message=reply,
+                )
             )
-        )
 
-    debate_id = str(uuid.uuid4())
-    debate = Debate(
-        id=debate_id,
-        question=req.question.strip(),
-        affirmative=req.models.affirmative,
-        negative=req.models.negative,
+    thread_id = str(uuid.uuid4())
+    thread = ForumThread(
+        id=thread_id,
+        question=bounded_question,
+        models=unique_models,
         transcript=transcript,
     )
 
-    DEBATES[debate_id] = debate
-    return debate
+    FORUM_THREADS[thread_id] = thread
+    return thread
 
-@app.get("/debates/{debate_id}", response_model=Debate)
-async def get_debate(debate_id: str) -> Debate:
-    debate = DEBATES.get(debate_id)
-    if debate is None:
-        raise HTTPException(status_code=404, detail="Debate not found")
-    return debate
+@app.get("/forums/{thread_id}", response_model=ForumThread)
+async def get_forum_thread(thread_id: str) -> ForumThread:
+    thread = FORUM_THREADS.get(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Forum thread not found")
+    return thread
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
