@@ -33,37 +33,24 @@ def _load_app_config() -> Dict[str, Any]:
 
 APP_CONFIG: Dict[str, Any] = _load_app_config()
 
-max_characters: int = int(APP_CONFIG["max_characters"])
-max_completion_tokens: int = int(APP_CONFIG["max_completion_tokens"])
-max_input_tokens: int = int(APP_CONFIG.get("max_input_tokens", 64))
-max_reasoning_tokens: int = int(APP_CONFIG.get("max_reasoning_tokens", 10000))
+max_output: int = int(APP_CONFIG["max_output"])
+max_input: int = int(APP_CONFIG.get("max_input", 64))
+max_time: int = int(APP_CONFIG.get("max_time", 15))
+approx_chars_per_token: int = 4
 
 def _get_system_template() -> Template:
     """Load system prompt template."""
     template_text = (PROJECT_ROOT / "system.md").read_text(encoding="utf-8")
     return Template(template_text)
 
-def _load_models_from_yaml() -> List[str]:
-    """Load enabled model IDs."""
-    try:
-        config_path = PROJECT_ROOT / "models.yaml"
-        if not config_path.exists():
-            return []
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        items = data.get("models", []) if isinstance(data, dict) else []
-        model_ids: List[str] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            enabled = item.get("enabled", True)
-            model_id = item.get("id")
-            if enabled and isinstance(model_id, str) and model_id.strip():
-                model_ids.append(model_id.strip())
-        return model_ids
-    except Exception:
-        return []
-
 # --- Data models ---
+class PostStatus(str, Enum):
+    thinking = "thinking"
+    idle = "idle"
+    success = "success"
+    fail = "fail"
+    error = "error"
+    
 class ForumCreateRequest(BaseModel):
     question: str = Field(..., min_length=3)
     models: List[str] = Field(..., min_items=1, description="List of model IDs to participate")
@@ -71,6 +58,7 @@ class ForumCreateRequest(BaseModel):
 class ForumPost(BaseModel):
     model: str
     message: str
+    status: PostStatus = Field(default=PostStatus.thinking)
 
 class ForumStatus(str, Enum):
     pending = "pending"
@@ -101,25 +89,24 @@ app.add_middleware(
 )
 
 # --- Helper functions ---
-def _validate_model_enabled(model_id: str) -> None:
-    enabled_models = set(_load_models_from_yaml())
-    mid = (model_id or "").strip()
-    if mid not in enabled_models:
-        raise HTTPException(status_code=400, detail=(
-            f"Model '{model_id}' is not enabled or not found in models.yaml."
-        ))
 
-def _system_prompt(question: str) -> str:
+def _approximate_max_characters_from_output_tokens(output_tokens: int) -> int:
+    # Approximate: 1 token ~= 4 chars; be conservative
+    soft_cap = max(1, output_tokens * approx_chars_per_token)
+    # Add a small cushion to avoid accidental truncation by models
+    return int(soft_cap * 0.95)
+
+
+def _system_prompt(question: str, soft_max_chars: int) -> str:
     template = _get_system_template()
     return template.safe_substitute(
         QUESTION=question,
-        MAX_CHARACTERS=str(max_characters),
+        MAX_CHARACTERS=str(soft_max_chars),
     )
 
 def _truncate_question_to_input_budget(question: str) -> str:
     # Approximate tokens as chars/4 and limit accordingly
-    approx_chars_per_token = 4
-    char_budget = max(1, max_input_tokens * approx_chars_per_token)
+    char_budget = max(1, max_input * approx_chars_per_token)
     q = (question or "").strip()
     if len(q) <= char_budget:
         return q
@@ -128,16 +115,30 @@ def _truncate_question_to_input_budget(question: str) -> str:
 async def _model_reply(
     model_name: str,
     question: str,
-) -> str:
-    system = _system_prompt(question=question)
+) -> ForumPost:
+    soft_max_chars = _approximate_max_characters_from_output_tokens(max_output)
+    system = _system_prompt(question=question, soft_max_chars=soft_max_chars)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
 
-    response = await acompletion(
-        model=model_name,
-        messages=messages,
-        max_tokens=max_completion_tokens,
-    )
+    try:
+        response = await asyncio.wait_for(
+            acompletion(
+                model=model_name,
+                messages=messages,
+                max_tokens=max_output,
+            ),
+            timeout=max_time,
+        )
+    except asyncio.TimeoutError:
+        return ForumPost(model=model_name, message="[timeout]", status=PostStatus.fail)
+    except Exception as e:
+        return ForumPost(
+            model=model_name,
+            message=f"[error] {type(e).__name__}: {str(e)}",
+            status=PostStatus.error,
+        )
+
     def _extract_content(resp: Dict[str, Any]) -> str:
         try:
             content_val = resp["choices"][0]["message"]["content"]
@@ -145,10 +146,11 @@ async def _model_reply(
         except Exception:
             return ""
 
-    content = _extract_content(response)
-    if len(content) > max_characters:
-        content = content[:max_characters].rstrip()
-    return content or "[empty]"
+    content = _extract_content(response) or "[empty]"
+    if len(content) > soft_max_chars:
+        truncated = content[:soft_max_chars].rstrip()
+        return ForumPost(model=model_name, message=truncated, status=PostStatus.fail)
+    return ForumPost(model=model_name, message=content, status=PostStatus.success)
 
 # In-memory store for forums
 FORUMS: Dict[str, Forum] = {}
@@ -194,10 +196,16 @@ async def _generate_forum_transcript(
 
         for model_name, result in zip(model_names, results):
             if isinstance(result, Exception):
-                message = f"[error] {type(result).__name__}: {str(result)}"
+                transcript.append(
+                    ForumPost(
+                        model=model_name,
+                        message=f"[error] {type(result).__name__}: {str(result)}",
+                        status=PostStatus.error,
+                    )
+                )
             else:
-                message = result or ""
-            transcript.append(ForumPost(model=model_name, message=message))
+                # result is already a ForumPost
+                transcript.append(result)
 
         async with FORUMS_LOCK:
             forum = FORUMS.get(forum_id)
@@ -220,40 +228,12 @@ async def create_forum(
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
 
-    # Validate requested models exist and are enabled
-    enabled_models_list = _load_models_from_yaml()
-    max_selectable = len(enabled_models_list)
-
-    # Pre-check: ensure requested unique count does not exceed available models
-    requested_unique = set()
-    for m in req.models:
-        if isinstance(m, str) and m.strip():
-            requested_unique.add(m.strip())
-    if max_selectable == 0:
-        raise HTTPException(status_code=400, detail="No models are available to select")
-    if len(requested_unique) > max_selectable:
-        raise HTTPException(
-            status_code=400,
-            detail=f"You can select up to {max_selectable} models",
-        )
-
-    unique_models = []
-    seen = set()
-    for m in req.models:
-        if not isinstance(m, str) or not m.strip():
-            continue
-        mid = m.strip()
-        if mid in seen:
-            continue
-        _validate_model_enabled(mid)
-        seen.add(mid)
-        unique_models.append(mid)
-    if not unique_models:
-        raise HTTPException(status_code=400, detail="No valid models provided")
+    # Pass through requested models directly; assume they are valid and unique
+    selected_models = req.models
 
     # Independent responses: show placeholders immediately
     transcript: List[ForumPost] = [
-        ForumPost(model=m, message="[pending]") for m in unique_models
+        ForumPost(model=m, message="[pending]", status=PostStatus.thinking) for m in selected_models
     ]
 
     # Enforce small input budget
@@ -263,7 +243,7 @@ async def create_forum(
     forum = Forum(
         id=forum_id,
         question=bounded_question,
-        models=unique_models,
+        models=selected_models,
         transcript=transcript,
         status=ForumStatus.pending,
     )
@@ -277,7 +257,7 @@ async def create_forum(
         _generate_forum_transcript(
             forum_id=forum_id,
             question=bounded_question,
-            model_names=unique_models,
+            model_names=selected_models,
         )
     )
     return forum

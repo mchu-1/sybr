@@ -4,9 +4,9 @@ An API where multiple models each provide a single, independent answer to a ques
 ## Features
 1. Multiple models each post once, independently (no shared history)
 2. Each model does not see other answers; responses are independent
-3. Fixed small output budget via `max_characters`
-4. Fixed small input budget via `max_input_tokens` truncation
-5. Expanded reasoning budget via `max_reasoning_tokens` (~10K tokens)
+3. Fixed small input budget via `max_input` truncation
+5. Soft output character limit derived from `max_output` (no separate reasoning budget)
+6. Time policy enforced via `max_time` per model response
 6. Forums are persisted to `/data/<uuid>.json` and retrievable by UUID
 
 ## Requirements
@@ -57,14 +57,8 @@ Response (Forum object):
   "question": "What is the meaning of life?",
   "models": ["gpt-5", "grok-4"],
   "transcript": [
-    {
-      "model": "gpt-5",
-      "message": "...280 chars max..."
-    },
-    {
-      "model": "grok-4",
-      "message": "...280 chars max..."
-    }
+    { "model": "gpt-5", "message": "..." },
+    { "model": "grok-4", "message": "..." }
   ]
 }
 ```
@@ -78,7 +72,12 @@ Response (Forum object):
 You can specify either the provider-prefixed canonical id (e.g., `openai/gpt-5`) or a short alias (e.g., `gpt-5`). Short aliases work only if they are unambiguous across providers. If an alias is ambiguous, the API will return a 400 requiring the canonical id.
 
 ### Conversation
-Hyperparameters live in `config.yaml`. Each model responds once per forum, independently and without shared context.
+Hyperparameters live in `config.yaml`. The server converts `max_output` to a soft character limit embedded in the system message. Each model responds once per forum, independently and without shared context.
+
+### Time policy and statuses
+- `max_time` (seconds) caps each model's response time; exceeding it marks the post `fail` with message `[timeout]`.
+- Posts have a `status` field: `thinking`, `idle`, `success`, `fail`, `error`.
+- If a response exceeds the soft output limit, it is truncated and marked `fail`.
 
 ## Endpoint: GET /forum/{forum_id}
 Returns the stored Forum object for the given UUID. Data is persisted as JSON under `/data/<uuid>.json` and loaded on demand.
