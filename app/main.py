@@ -73,6 +73,17 @@ class Forum(BaseModel):
     transcript: List[ForumPost]
     status: ForumStatus = Field(default=ForumStatus.pending)
 
+class ForumCreateResponse(BaseModel):
+    id: str
+
+class ForumDetailResponse(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+    id: str
+    question: str
+    models: List[str]
+    status: ForumStatus
+    transcript: Dict[str, str]
+
 app = FastAPI(title="Forum API", version="0.3.1")
 
 app.add_middleware(
@@ -175,6 +186,15 @@ def _load_forum_from_disk(forum_id: str) -> Optional[Forum]:
         return None
 
 # --- Endpoints ---
+def _to_detail_response(forum: Forum) -> ForumDetailResponse:
+    unpacked: Dict[str, str] = {post.model: post.message for post in forum.transcript}
+    return ForumDetailResponse(
+        id=forum.id,
+        question=forum.question,
+        models=forum.models,
+        status=forum.status,
+        transcript=unpacked,
+    )
 async def _generate_forum_transcript(
     forum_id: str,
     question: str,
@@ -216,10 +236,10 @@ async def _generate_forum_transcript(
                 forum.status = ForumStatus.error
                 _save_forum_to_disk(forum)
 
-@app.post("/forum", response_model=Forum)
+@app.post("/forum", response_model=ForumCreateResponse)
 async def create_forum(
     req: ForumCreateRequest,
-) -> Forum:
+) -> ForumCreateResponse:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
 
@@ -255,19 +275,19 @@ async def create_forum(
             model_names=selected_models,
         )
     )
-    return forum
+    return ForumCreateResponse(id=forum_id)
 
-@app.get("/forum/{forum_id}", response_model=Forum)
-async def get_forum(forum_id: str) -> Forum:
+@app.get("/forum/{forum_id}", response_model=ForumDetailResponse)
+async def get_forum(forum_id: str) -> ForumDetailResponse:
     forum = FORUMS.get(forum_id)
     if forum is None:
         loaded = _load_forum_from_disk(forum_id)
         if loaded is not None:
             async with FORUMS_LOCK:
                 FORUMS[forum_id] = loaded
-            return loaded
+            return _to_detail_response(loaded)
         raise HTTPException(status_code=404, detail="Forum not found")
-    return forum
+    return _to_detail_response(forum)
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
