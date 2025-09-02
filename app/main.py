@@ -33,7 +33,8 @@ def _load_app_config() -> Dict[str, Any]:
 
 APP_CONFIG: Dict[str, Any] = _load_app_config()
 
-max_output: int = int(APP_CONFIG["max_output"])
+max_tokens: int = int(APP_CONFIG["max_tokens"])
+max_chars: int = int(APP_CONFIG["max_chars"])
 max_input: int = int(APP_CONFIG.get("max_input", 64))
 max_time: int = int(APP_CONFIG.get("max_time", 15))
 approx_chars_per_token: int = 4
@@ -89,19 +90,11 @@ app.add_middleware(
 )
 
 # --- Helper functions ---
-
-def _approximate_max_characters_from_output_tokens(output_tokens: int) -> int:
-    # Approximate: 1 token ~= 4 chars; be conservative
-    soft_cap = max(1, output_tokens * approx_chars_per_token)
-    # Add a small cushion to avoid accidental truncation by models
-    return int(soft_cap * 0.95)
-
-
-def _system_prompt(question: str, soft_max_chars: int) -> str:
+def _system_prompt(question: str, max_chars: int) -> str:
     template = _get_system_template()
     return template.safe_substitute(
         QUESTION=question,
-        MAX_CHARACTERS=str(soft_max_chars),
+        MAX_CHARACTERS=str(max_chars),
     )
 
 def _truncate_question_to_input_budget(question: str) -> str:
@@ -116,8 +109,7 @@ async def _model_reply(
     model_name: str,
     question: str,
 ) -> ForumPost:
-    soft_max_chars = _approximate_max_characters_from_output_tokens(max_output)
-    system = _system_prompt(question=question, soft_max_chars=soft_max_chars)
+    system = _system_prompt(question=question, max_chars=max_chars)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
 
@@ -126,7 +118,7 @@ async def _model_reply(
             acompletion(
                 model=model_name,
                 messages=messages,
-                max_tokens=max_output,
+                max_tokens=max_tokens,
             ),
             timeout=max_time,
         )
