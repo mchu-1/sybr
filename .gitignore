@@ -3,3 +3,5 @@ uv.lock
 uvicorn.log
 pyproject.toml
 .env
+test.py
+data/

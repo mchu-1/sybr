@@ -1,15 +1,15 @@
 models:
-  - id: gpt-5
+  - id: openai/gpt-5
     provider: openai
     enabled: true
     env_var: OPENAI_API_KEY
 
-  - id: grok-4
+  - id: xai/grok-4
     provider: xai
     enabled: true
     env_var: XAI_API_KEY
 
-  - id: gemini-2.5-pro
+  - id: gemini/gemini-2.5-pro
     provider: google
     enabled: true
     env_var: GEMINI_API_KEY
@@ -18,3 +18,8 @@ models:
     provider: deepseek
     enabled: true
     env_var: DEEPSEEK_API_KEY
+
+  - id: claude-opus-4-1-20250805
+    provider: anthropic
+    enabled: true
+    env_var: ANTHROPIC_API_KEY

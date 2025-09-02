@@ -1,23 +1,26 @@
 import uuid
 import asyncio
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from enum import Enum
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from string import Template
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-# from os import getenv
 
 from litellm import acompletion
+import json
 import yaml
 from dotenv import load_dotenv
 
 # --- Configuration ---
 load_dotenv()  # Load API keys from .env into environment
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+DATA_DIR: Path = PROJECT_ROOT / "data"
+FORUMS_DIR: Path = DATA_DIR
+FORUMS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _load_app_config() -> Dict[str, Any]:
     config_path = PROJECT_ROOT / "config.yaml"
@@ -69,14 +72,20 @@ class ForumPost(BaseModel):
     model: str
     message: str
 
+class ForumStatus(str, Enum):
+    pending = "pending"
+    complete = "complete"
+    error = "error"
+
 class Forum(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
     id: str
     question: str
     models: List[str]
     transcript: List[ForumPost]
-    status: str
+    status: ForumStatus = Field(default=ForumStatus.pending)
 
-app = FastAPI(title="Forum API", version="0.3.0")
+app = FastAPI(title="Forum API", version="0.3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -94,7 +103,8 @@ app.add_middleware(
 # --- Helper functions ---
 def _validate_model_enabled(model_id: str) -> None:
     enabled_models = set(_load_models_from_yaml())
-    if model_id not in enabled_models:
+    mid = (model_id or "").strip()
+    if mid not in enabled_models:
         raise HTTPException(status_code=400, detail=(
             f"Model '{model_id}' is not enabled or not found in models.yaml."
         ))
@@ -115,8 +125,6 @@ def _truncate_question_to_input_budget(question: str) -> str:
         return q
     return q[:char_budget].rstrip()
 
-
-
 async def _model_reply(
     model_name: str,
     question: str,
@@ -128,26 +136,46 @@ async def _model_reply(
     response = await acompletion(
         model=model_name,
         messages=messages,
-        # Provide both for compatibility across providers/wrappers
         max_tokens=max_completion_tokens,
-        max_completion_tokens=max_completion_tokens,
-        # sampling params removed per request
     )
-    content = (
-        (response.get("choices") or [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
+    def _extract_content(resp: Dict[str, Any]) -> str:
+        try:
+            content_val = resp["choices"][0]["message"]["content"]
+            return content_val.strip() if isinstance(content_val, str) else ""
+        except Exception:
+            return ""
+
+    content = _extract_content(response)
     if len(content) > max_characters:
         content = content[:max_characters].rstrip()
-    return content
+    return content or "[empty]"
 
 # In-memory store for forums
 FORUMS: Dict[str, Forum] = {}
 FORUMS_LOCK = asyncio.Lock()
 
-## Public API: no auth
+# --- Persistence helpers ---
+def _forum_path(forum_id: str) -> Path:
+    return FORUMS_DIR / f"{forum_id}.json"
+
+
+def _save_forum_to_disk(forum: Forum) -> None:
+    try:
+        path = _forum_path(forum.id)
+        data = forum.model_dump(mode="json")
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _load_forum_from_disk(forum_id: str) -> Optional[Forum]:
+    try:
+        path = _forum_path(forum_id)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return Forum(**data)
+    except Exception:
+        return None
 
 # --- Endpoints ---
 async def _generate_forum_transcript(
@@ -175,14 +203,15 @@ async def _generate_forum_transcript(
             forum = FORUMS.get(forum_id)
             if forum is not None:
                 forum.transcript = transcript
-                forum.status = "complete"
+                forum.status = ForumStatus.complete
+                _save_forum_to_disk(forum)
     except Exception as e:
         async with FORUMS_LOCK:
             forum = FORUMS.get(forum_id)
             if forum is not None:
                 forum.transcript = transcript
-                forum.status = "error"
-
+                forum.status = ForumStatus.error
+                _save_forum_to_disk(forum)
 
 @app.post("/forum", response_model=Forum)
 async def create_forum(
@@ -222,8 +251,10 @@ async def create_forum(
     if not unique_models:
         raise HTTPException(status_code=400, detail="No valid models provided")
 
-    # Independent responses: no shared history
-    transcript: List[ForumPost] = []
+    # Independent responses: show placeholders immediately
+    transcript: List[ForumPost] = [
+        ForumPost(model=m, message="[pending]") for m in unique_models
+    ]
 
     # Enforce small input budget
     bounded_question = _truncate_question_to_input_budget(req.question)
@@ -234,11 +265,12 @@ async def create_forum(
         question=bounded_question,
         models=unique_models,
         transcript=transcript,
-        status="pending",
+        status=ForumStatus.pending,
     )
 
     async with FORUMS_LOCK:
         FORUMS[forum_id] = forum
+        _save_forum_to_disk(forum)
 
     # Kick off background generation and return immediately
     asyncio.create_task(
@@ -254,6 +286,11 @@ async def create_forum(
 async def get_forum(forum_id: str) -> Forum:
     forum = FORUMS.get(forum_id)
     if forum is None:
+        loaded = _load_forum_from_disk(forum_id)
+        if loaded is not None:
+            async with FORUMS_LOCK:
+                FORUMS[forum_id] = loaded
+            return loaded
         raise HTTPException(status_code=404, detail="Forum not found")
     return forum
 

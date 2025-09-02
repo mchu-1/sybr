@@ -7,7 +7,7 @@ An API where multiple models each provide a single, independent answer to a ques
 3. Fixed small output budget via `max_characters`
 4. Fixed small input budget via `max_input_tokens` truncation
 5. Expanded reasoning budget via `max_reasoning_tokens` (~10K tokens)
-6. Forums are stored in-memory and retrievable by UUID for the session
+6. Forums are persisted to `/data/<uuid>.json` and retrievable by UUID
 
 ## Requirements
 - Python 3.10+
@@ -75,11 +75,13 @@ Response (Forum object):
 - At least 1 model must be selected, up to the number of available models.
 - You may include duplicates; duplicates are de-duplicated.
 
+You can specify either the provider-prefixed canonical id (e.g., `openai/gpt-5`) or a short alias (e.g., `gpt-5`). Short aliases work only if they are unambiguous across providers. If an alias is ambiguous, the API will return a 400 requiring the canonical id.
+
 ### Conversation
 Hyperparameters live in `config.yaml`. Each model responds once per forum, independently and without shared context.
 
 ## Endpoint: GET /forum/{forum_id}
-Returns the stored Forum object for the given UUID. In-memory only for the life of the process.
+Returns the stored Forum object for the given UUID. Data is persisted as JSON under `/data/<uuid>.json` and loaded on demand.
 
 ### Model configuration
 Models are listed in `models.yaml`.
