@@ -5,3 +5,4 @@ pyproject.toml
 .env
 test.py
 data/
+response.json

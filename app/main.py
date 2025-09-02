@@ -37,7 +37,6 @@ max_output: int = int(APP_CONFIG["max_output"])
 max_input: int = int(APP_CONFIG.get("max_input", 64))
 max_time: int = int(APP_CONFIG.get("max_time", 15))
 approx_chars_per_token: int = 4
-RESPONSE_CHAR_LIMIT: int = 280
 
 def _get_system_template() -> Template:
     """Load system prompt template."""
@@ -117,7 +116,7 @@ async def _model_reply(
     model_name: str,
     question: str,
 ) -> ForumPost:
-    soft_max_chars = RESPONSE_CHAR_LIMIT
+    soft_max_chars = _approximate_max_characters_from_output_tokens(max_output)
     system = _system_prompt(question=question, soft_max_chars=soft_max_chars)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     messages.append({"role": "user", "content": question})
@@ -140,14 +139,18 @@ async def _model_reply(
             status=PostStatus.error,
         )
 
-    def _extract_content(resp: Dict[str, Any]) -> str:
+    def _extract_content(resp: Any) -> str:
+        """Return the assistant content using the OpenAI-style schema: choices[0].message.content"""
         try:
-            content_val = resp["choices"][0]["message"]["content"]
-            return content_val.strip() if isinstance(content_val, str) else ""
+            if hasattr(resp, "model_dump") and callable(getattr(resp, "model_dump")):
+                resp = resp.model_dump()
+            return (resp["choices"][0]["message"]["content"] or "").strip()
         except Exception:
             return ""
 
-    content = _extract_content(response) or "[empty]"
+    content = _extract_content(response)
+    if not content:
+        return ForumPost(model=model_name, message="[empty]", status=PostStatus.fail)
     if len(content) > soft_max_chars:
         truncated = content[:soft_max_chars].rstrip()
         return ForumPost(model=model_name, message=truncated, status=PostStatus.fail)

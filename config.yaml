@@ -1,4 +1,4 @@
 # Token budgets
-max_output: 256
+max_output: 74
 max_input: 64
 max_time: 15
