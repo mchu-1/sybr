@@ -1,11 +1,13 @@
-# Debate Arena
-A multi-turn debate API between two models with deterministic side assignments.
+# Forum Arena
+A multi-turn forum API where multiple models post in a shared thread.
 
 ## Features
-1. Deterministic sides: user selects models for affirmative and negative
+1. Multiple models post in a round-robin forum (no adversarial sides)
 2. Each model sees the full conversation history before responding
-3. 280-character responses enforced via `max_tokens` approximation
-4. Debates are stored in-memory and retrievable by UUID for the session
+3. Fixed small output budget via `max_characters`
+4. Fixed small input budget via `max_input_tokens` truncation
+5. Expanded reasoning budget via `max_reasoning_tokens` (~10K tokens)
+6. Threads are stored in-memory and retrievable by UUID for the session
 
 ## Requirements
 - Python 3.10+
@@ -16,36 +18,33 @@ A multi-turn debate API between two models with deterministic side assignments.
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-## Endpoint: POST /debates
+## Endpoint: POST /forums
 Request body:
 ```json
 {
-  "question": "Should governments ban TikTok?",
-  "models": {
-    "affirmative": "gpt-5-high",
-    "negative": "grok-4"
-  },
-  "turns": 2
+  "question": "What is the meaning of life?",
+  "models": [
+    "gpt-5-high",
+    "grok-4"
+  ],
+  "turns": 1
 }
 ```
 
-Response (Debate object):
+Response (ForumThread object):
 ```json
 {
   "id": "c2c5d57b-5b3f-4bd9-a9f3-7f9f6b8b4a8e",
-  "question": "Should governments ban TikTok?",
-  "affirmative": "gpt-5-high",
-  "negative": "grok-4",
+  "question": "What is the meaning of life?",
+  "models": ["gpt-5-high", "grok-4"],
   "transcript": [
     {
       "turn": 1,
-      "side": "affirmative",
       "model": "gpt-5-high",
       "message": "...280 chars max..."
     },
     {
       "turn": 1,
-      "side": "negative",
       "model": "grok-4",
       "message": "...280 chars max..."
     }
@@ -54,15 +53,15 @@ Response (Debate object):
 ```
 
 ### Model selection
-- You must provide model IDs for both `affirmative` and `negative`.
+- Provide one or more model IDs in an array.
 - Model IDs must be enabled in `models.yaml`.
-- You may use the same model for both sides.
+- You may include duplicates; duplicates are de-duplicated.
 
 ### Conversation
 Hyperparameters live in `config.yaml`.
 
-## Endpoint: GET /debates/{id}
-Returns the stored Debate object for the given UUID. In-memory only for the life of the process.
+## Endpoint: GET /forums/{id}
+Returns the stored ForumThread object for the given UUID. In-memory only for the life of the process.
 
 ### Model configuration
 Models are listed in `models.yaml`.
