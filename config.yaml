@@ -1,4 +1,4 @@
-# Token budgets
+# Budgets
 max_tokens: 10000
 max_chars: 280
 max_input: 64

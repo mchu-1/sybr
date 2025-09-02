@@ -14,7 +14,7 @@ models:
     enabled: true
     env_var: GEMINI_API_KEY
 
-  - id: deepseek-reasoner
+  - id: deepseek/deepseek-reasoner
     provider: deepseek
     enabled: true
     env_var: DEEPSEEK_API_KEY

@@ -142,8 +142,8 @@ async def _model_reply(
     content = _extract_content(response)
     if not content:
         return ForumPost(model=model_name, message="[empty]", status=PostStatus.fail)
-    if len(content) > soft_max_chars:
-        truncated = content[:soft_max_chars].rstrip()
+    if len(content) > max_chars:
+        truncated = content[:max_chars].rstrip()
         return ForumPost(model=model_name, message=truncated, status=PostStatus.fail)
     return ForumPost(model=model_name, message=content, status=PostStatus.success)
 
