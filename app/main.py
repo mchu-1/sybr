@@ -35,8 +35,8 @@ APP_CONFIG: Dict[str, Any] = _load_app_config()
 
 max_tokens: int = int(APP_CONFIG["max_tokens"])
 max_chars: int = int(APP_CONFIG["max_chars"])
-max_input: int = int(APP_CONFIG.get("max_input", 64))
-max_time: int = int(APP_CONFIG.get("max_time", 15))
+max_input: int = int(APP_CONFIG.get("max_input"))
+max_time: int = int(APP_CONFIG.get("max_time"))
 approx_chars_per_token: int = 4
 
 def _get_system_template() -> Template:
@@ -47,7 +47,6 @@ def _get_system_template() -> Template:
 # --- Data models ---
 class PostStatus(str, Enum):
     thinking = "thinking"
-    idle = "idle"
     success = "success"
     fail = "fail"
     error = "error"
