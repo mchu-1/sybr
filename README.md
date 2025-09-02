@@ -2,7 +2,7 @@
 A multi-turn forum API where multiple models post in a shared thread.
 
 ## Features
-1. Multiple models post in a round-robin forum (no adversarial sides)
+1. Multiple models each post once in a round-robin forum (no adversarial sides)
 2. Each model sees the full conversation history before responding
 3. Fixed small output budget via `max_characters`
 4. Fixed small input budget via `max_input_tokens` truncation
@@ -26,8 +26,7 @@ Request body:
   "models": [
     "gpt-5-high",
     "grok-4"
-  ],
-  "turns": 1
+  ]
 }
 ```
 
@@ -58,7 +57,7 @@ Response (ForumThread object):
 - You may include duplicates; duplicates are de-duplicated.
 
 ### Conversation
-Hyperparameters live in `config.yaml`.
+Hyperparameters live in `config.yaml`. Each model responds once per thread.
 
 ## Endpoint: GET /forums/{id}
 Returns the stored ForumThread object for the given UUID. In-memory only for the life of the process.

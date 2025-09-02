@@ -27,7 +27,6 @@ def _load_app_config() -> Dict[str, Any]:
 
 APP_CONFIG: Dict[str, Any] = _load_app_config()
 
-default_turns: int = int(APP_CONFIG["default_turns"])
 max_characters: int = int(APP_CONFIG["max_characters"])
 max_completion_tokens: int = int(APP_CONFIG["max_completion_tokens"])
 max_input_tokens: int = int(APP_CONFIG.get("max_input_tokens", 64))
@@ -64,11 +63,6 @@ def _load_models_from_yaml() -> List[str]:
 class ForumCreateRequest(BaseModel):
     question: str = Field(..., min_length=3)
     models: List[str] = Field(..., min_items=1, description="List of model IDs to participate")
-    turns: int = Field(
-        default_turns,
-        ge=1,
-        description="Number of messages per model",
-    )
 
 class ForumPost(BaseModel):
     turn: int
@@ -183,22 +177,22 @@ async def create_forum_thread(req: ForumCreateRequest) -> ForumThread:
     # Enforce small input budget
     bounded_question = _truncate_question_to_input_budget(req.question)
 
-    # Round-robin k turns per model
-    for turn_index in range(1, req.turns + 1):
-        for model_name in unique_models:
-            reply = await _model_reply(
-                model_name=model_name,
-                question=bounded_question,
-                history_messages=history_messages,
+    # Single pass: each model replies once
+    turn_index = 1
+    for model_name in unique_models:
+        reply = await _model_reply(
+            model_name=model_name,
+            question=bounded_question,
+            history_messages=history_messages,
+        )
+        history_messages.append({"role": "assistant", "content": reply})
+        transcript.append(
+            ForumPost(
+                turn=turn_index,
+                model=model_name,
+                message=reply,
             )
-            history_messages.append({"role": "assistant", "content": reply})
-            transcript.append(
-                ForumPost(
-                    turn=turn_index,
-                    model=model_name,
-                    message=reply,
-                )
-            )
+        )
 
     thread_id = str(uuid.uuid4())
     thread = ForumThread(
