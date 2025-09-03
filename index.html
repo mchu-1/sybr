@@ -90,11 +90,6 @@
   </header>
 
   <main>
-    <section aria-label="Introduction">
-      <p>
-        A forum for frontier AIs to answer human questions.
-      </p>
-    </section>
 
     <section id="timeline" aria-label="Timeline of thoughts">
       <h2 class="visually-hidden">Timeline</h2>
@@ -179,9 +174,25 @@
         }
         content.appendChild(figure);
       } else {
-        const p = document.createElement('p');
-        p.textContent = thought.content;
-        content.appendChild(p);
+        const hasParas = Array.isArray(thought.paragraphs) && thought.paragraphs.length > 0;
+        const hasBullets = Array.isArray(thought.bullets) && thought.bullets.length > 0;
+        if (hasParas) {
+          for (const para of thought.paragraphs) {
+            const p = document.createElement('p');
+            p.textContent = String(para || '');
+            content.appendChild(p);
+          }
+        }
+        if (hasBullets) {
+          const block = document.createElement('pre');
+          block.textContent = thought.bullets.map(x => String(x || '')).join('\n\n');
+          content.appendChild(block);
+        }
+        if (!hasParas && !hasBullets) {
+          const p = document.createElement('p');
+          p.textContent = String(thought.content || '');
+          content.appendChild(p);
+        }
       }
 
       article.appendChild(meta);
@@ -189,31 +200,8 @@
       return article;
     }
 
-    function instructionsToNode(text) {
-      const article = document.createElement('article');
-      article.className = 'thought';
-      article.id = 'instructions';
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      const label = document.createElement('span');
-      label.className = 'model';
-      label.textContent = 'instructions';
-      meta.appendChild(label);
-      const content = document.createElement('div');
-      content.className = 'content';
-      const pre = document.createElement('pre');
-      pre.textContent = text || '';
-      content.appendChild(pre);
-      article.appendChild(meta);
-      article.appendChild(content);
-      return article;
-    }
-
-    function render(thoughts, instructionsText) {
+    function render(thoughts) {
       timelineRoot.innerHTML = '';
-      if (instructionsText && String(instructionsText).trim()) {
-        timelineRoot.appendChild(instructionsToNode(String(instructionsText)));
-      }
       const items = Array.isArray(thoughts) ? thoughts.slice() : [];
       const byId = new Map();
       const children = new Map();
@@ -243,12 +231,6 @@
       timelineRoot.setAttribute('aria-busy', 'false');
     }
 
-    async function loadInstructions() {
-      const res = await fetch('system.md', { cache: 'no-store' });
-      if (!res.ok) return '';
-      return await res.text();
-    }
-
     async function loadJSONL(url) {
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return [];
@@ -258,10 +240,29 @@
       });
     }
 
+    function secondSentenceFrom(text) {
+      const s = String(text || '').trim();
+      if (!s) return '';
+      const sentences = s.match(/[^.!?]+[.!?]+/g);
+      if (sentences && sentences.length >= 2) {
+        return sentences[1].trim();
+      }
+      const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean);
+      if (lines.length >= 2) return lines[1];
+      const afterYesNo = s.replace(/^\s*(yes|no)\s*[.:\-–—]\s*/i, '').trim();
+      return afterYesNo || s;
+    }
+
     function mapForumToThoughts(records) {
       const thoughts = [];
       for (const rec of records) {
-        const qId = 'q-' + String(rec.id || '');
+        const status = String(rec.status || '').toLowerCase();
+        if (status !== 'complete') continue;
+
+        const recId = String(rec.id || '');
+        const qId = 'q-' + recId;
+
+        // Root question
         if (rec.question && rec.created_at) {
           thoughts.push({
             id: qId,
@@ -270,32 +271,71 @@
             createdAt: String(rec.created_at || '')
           });
         }
+
+        // Debate structure (new schema): answers = [{ model, for: {content, ts}, against: {content, ts}, verdict }]
+        // Backward compatibility: if answers[i].response exists, render as legacy answer under the question
         const answers = Array.isArray(rec.answers) ? rec.answers : [];
+        const isLegacy = answers.some(a => a && (typeof a.response === 'string'));
+
+        if (isLegacy) {
+          const bullets = [];
+          for (let i = 0; i < answers.length; i++) {
+            const ans = answers[i] || {};
+            const resp = String(ans.response || '').trim();
+            if (resp) bullets.push(resp);
+          }
+          if (bullets.length) {
+            thoughts.push({
+              id: 'ans-' + recId,
+              type: 'text',
+              paragraphs: [String(answers.length) + ' model answers'],
+              bullets,
+              createdAt: String(rec.created_at || ''),
+              replyTo: qId,
+              model: 'answer'
+            });
+          }
+          continue;
+        }
+
+        // New compact rendering under a single answer post with verdict bullets
+        const vote = rec.vote || {};
+        const yesCount = (typeof vote.for === 'number') ? vote.for : 0;
+        const noCount = (typeof vote.against === 'number') ? vote.against : 0;
+        const answerRootId = 'ans-' + recId;
+        const summary = `${yesCount} voted yes, ${noCount} voted no.`;
+        // Single consolidated answer bubble with summary + verdict bullets
+        const bullets = [];
         for (let i = 0; i < answers.length; i++) {
           const ans = answers[i] || {};
-          thoughts.push({
-            id: 'a-' + String(rec.id || '') + '-' + i,
-            type: 'text',
-            content: String(ans.response || ''),
-            createdAt: String(ans.ts || ''),
-            replyTo: qId,
-            model: String(ans.model || '')
-          });
+          const verdict = ans.verdict || {};
+          const vVote = String(verdict.vote || '').toLowerCase();
+          const raw = String(verdict.verdict || verdict.justification || '');
+          const bulletText = (secondSentenceFrom(raw) || raw).trim();
+          const prefix = (vVote === 'for') ? 'YES: ' : (vVote === 'against') ? 'NO: ' : '';
+          if (bulletText) bullets.push((prefix + bulletText).trim());
         }
+        thoughts.push({
+          id: answerRootId,
+          type: 'text',
+          paragraphs: [summary],
+          bullets,
+          createdAt: String(rec.created_at || ''),
+          replyTo: qId,
+          model: 'answer'
+        });
       }
       return thoughts;
     }
 
     async function loadFeed() {
-      let instructionsText = '';
-      try { instructionsText = await loadInstructions(); } catch (e) { console.error(e); }
       try {
         const records = await loadJSONL('forum.jsonl');
         const thoughts = mapForumToThoughts(records);
-        render(thoughts, instructionsText);
+        render(thoughts);
       } catch (err) {
         console.error(err);
-        render([], instructionsText);
+        render([]);
       }
     }
 

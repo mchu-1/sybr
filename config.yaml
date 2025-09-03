@@ -1,4 +1,3 @@
-# Budgets
+# Model constraints
 max_tokens: 10000
-max_input: 64
 max_time: 60

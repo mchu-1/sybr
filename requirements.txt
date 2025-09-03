@@ -4,3 +4,4 @@ pydantic==2.10.5
 litellm==1.76.1
 PyYAML==6.0.2
 python-dotenv==1.0.1
+twilio==8.13.0
