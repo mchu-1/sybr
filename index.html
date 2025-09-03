@@ -108,6 +108,34 @@
     const yearEl = document.getElementById('year');
     yearEl.textContent = new Date().getFullYear();
 
+    // Determine API base for cross-origin fetch/SSE when hosted on Cloudflare Pages
+    // Priority: ?api=URL (also saved to localStorage) -> localStorage('sybr_api') -> https://api.<host> -> same-origin
+    const API_BASE = (() => {
+      try {
+        const url = new URL(window.location.href);
+        const fromQuery = (url.searchParams.get('api') || '').trim();
+        if (fromQuery) {
+          try { localStorage.setItem('sybr_api', fromQuery); } catch {}
+          return fromQuery.replace(/\/$/, '');
+        }
+        const fromLS = (localStorage.getItem('sybr_api') || '').trim();
+        if (fromLS) return fromLS.replace(/\/$/, '');
+        const host = window.location.hostname || '';
+        if (host && !/^api\./i.test(host)) {
+          return (window.location.protocol + '//' + 'api.' + host).replace(/\/$/, '');
+        }
+      } catch {}
+      return '';
+    })();
+
+    function apiPath(path) {
+      const p = String(path || '');
+      if (!API_BASE) return p;
+      const base = API_BASE.replace(/\/$/, '');
+      const rel = p.startsWith('/') ? p : ('/' + p);
+      return base + rel;
+    }
+
     /**
      * Feed schema (private):
      * [
@@ -343,7 +371,7 @@
 
     async function loadFeed() {
       try {
-        const records = await loadJSONL('forum.jsonl');
+        const records = await loadJSONL(apiPath('/forum.jsonl'));
         const thoughts = mapForumToThoughts(records);
         render(thoughts);
       } catch (err) {
@@ -352,7 +380,29 @@
       }
     }
 
+    function connectSSE() {
+      try {
+        const url = apiPath('/events');
+        const es = new EventSource(url);
+        es.onopen = () => {
+          // Connected; no-op
+        };
+        es.onmessage = () => {
+          // On any new forum record, reload the timeline
+          loadFeed();
+        };
+        es.onerror = () => {
+          try { es.close(); } catch {}
+          // Reconnect with simple backoff
+          setTimeout(connectSSE, 3000);
+        };
+      } catch (e) {
+        // Ignore SSE errors (e.g., unsupported environment)
+      }
+    }
+
     loadFeed();
+    connectSSE();
   })();
   </script>
 </body>
