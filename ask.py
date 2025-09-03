@@ -13,10 +13,12 @@ import yaml
 from dotenv import load_dotenv, dotenv_values
 from litellm import acompletion
 from fastapi import FastAPI, Request, BackgroundTasks, Form
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+from redis import asyncio as aioredis
 
 
 # --- Setup ---
@@ -33,6 +35,17 @@ VERDICT_PROMPT_PATH: Path = PROJECT_ROOT / "verdict.md"
 # --- FastAPI (consolidated server) ---
 app = FastAPI()
 app.add_middleware(ProxyHeadersMiddleware)
+
+# Allow Cloudflare Pages domain(s) to access the API via CORS
+_origins_raw = os.getenv("CORS_ORIGINS") or "https://thesybr.net, https://www.thesybr.net"
+_CORS_ORIGINS: List[str] = [o.strip() for o in re.split(r"[,;\s]+", _origins_raw) if o and o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"]
+)
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -60,6 +73,7 @@ FORUM_URL: str = _env("FORUM_URL")
 TWILIO_VALIDATE: bool = str(_env("TWILIO_VALIDATE", "false")).strip().lower() in {"1", "true", "yes", "on"}
 
 _twilio_client_singleton: Optional[Client] = None
+_redis_singleton: Optional[aioredis.Redis] = None
 
 
 def _get_twilio_client() -> Client:
@@ -69,6 +83,37 @@ def _get_twilio_client() -> Client:
             raise RuntimeError("Twilio credentials are not configured")
         _twilio_client_singleton = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     return _twilio_client_singleton
+
+
+def _get_redis() -> aioredis.Redis:
+    global _redis_singleton
+    if _redis_singleton is None:
+        url = _env("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
+        _redis_singleton = aioredis.from_url(url, decode_responses=True)
+    return _redis_singleton
+
+
+REDIS_CHANNEL: str = str(_env("REDIS_CHANNEL", "sybr:forum") or "sybr:forum")
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    try:
+        r = _get_redis()
+        await r.ping()
+    except Exception:
+        # Redis optional
+        pass
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    global _redis_singleton
+    try:
+        if _redis_singleton is not None:
+            await _redis_singleton.close()
+    except Exception:
+        pass
 
 
 def _parse_whitelist(raw: str) -> List[str]:
@@ -142,6 +187,10 @@ async def _process_and_reply(question: str, user_number: str) -> None:
         _ensure_forum_file()
         record = await _debate_all_models(question)
         _append_forum_record(record)
+        try:
+            await _publish_redis_event(record)
+        except Exception:
+            pass
         # Compose SMS body in compact format:
         # Yes (X) No (Y)\nthesybr.net
         vote = record.get("vote", {}) or {}
@@ -189,6 +238,58 @@ async def sms_webhook(
     # Queue background processing and return no content (no auto-reply)
     background_tasks.add_task(_process_and_reply, question, from_number)
     return Response(content="", status_code=204)
+
+
+# --- Forum serving & SSE ---
+
+
+@app.get("/forum.jsonl", response_class=PlainTextResponse)
+async def serve_forum_file() -> str:
+    _ensure_forum_file()
+    return FORUM_JSONL_PATH.read_text(encoding="utf-8")
+
+
+@app.get("/events")
+async def sse_events(request: Request) -> StreamingResponse:
+    async def event_generator():
+        pubsub = None
+        try:
+            r = _get_redis()
+            pubsub = r.pubsub()
+            await pubsub.subscribe(REDIS_CHANNEL)
+            yield b": connected\n\n"
+            last_heartbeat = asyncio.get_event_loop().time()
+            async for message in pubsub.listen():
+                if await request.is_disconnected():
+                    break
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat >= 20:
+                    yield b": ping\n\n"
+                    last_heartbeat = now
+                if not isinstance(message, dict) or message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if data is None:
+                    continue
+                try:
+                    payload = str(data)
+                except Exception:
+                    continue
+                yield ("data: " + payload + "\n\n").encode("utf-8")
+        finally:
+            try:
+                if pubsub is not None:
+                    await pubsub.unsubscribe(REDIS_CHANNEL)
+                    await pubsub.close()
+            except Exception:
+                pass
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
 
 
 # --- Config ---
@@ -250,6 +351,15 @@ def _ensure_forum_file() -> None:
 def _append_forum_record(record: Dict[str, Any]) -> None:
     with FORUM_JSONL_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+async def _publish_redis_event(record: Dict[str, Any]) -> None:
+    try:
+        r = _get_redis()
+        await r.publish(REDIS_CHANNEL, json.dumps(record, ensure_ascii=False))
+    except Exception:
+        # Best-effort
+        pass
 
 
 async def _ask_one_model(model_name: str, question: str, max_tokens: int, timeout_s: int) -> Dict[str, Any]:
