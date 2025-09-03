@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, Form
 from fastapi.responses import PlainTextResponse, Response
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
-from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 
 # --- Setup ---
