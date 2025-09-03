@@ -88,12 +88,12 @@ def _get_twilio_client() -> Client:
 def _get_redis() -> aioredis.Redis:
     global _redis_singleton
     if _redis_singleton is None:
-        url = _env("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
+        url = _env("REDIS_URL")
         _redis_singleton = aioredis.from_url(url, decode_responses=True)
     return _redis_singleton
 
 
-REDIS_CHANNEL: str = str(_env("REDIS_CHANNEL", "sybr:forum") or "sybr:forum")
+REDIS_CHANNEL: str = str(_env("REDIS_CHANNEL"))
 
 
 @app.on_event("startup")
