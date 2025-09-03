@@ -124,6 +124,17 @@
       return dateStr;
     }
 
+    function shuffled(a) {
+      const arr = Array.isArray(a) ? a.slice() : [];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+      }
+      return arr;
+    }
+
     function thoughtToNode(thought) {
       const article = document.createElement('article');
       article.className = 'thought';
@@ -276,12 +287,13 @@
         // Debate structure (new schema): answers = [{ model, for: {content, ts}, against: {content, ts}, verdict }]
         // Backward compatibility: if answers[i].response exists, render as legacy answer under the question
         const answers = Array.isArray(rec.answers) ? rec.answers : [];
-        const isLegacy = answers.some(a => a && (typeof a.response === 'string'));
+        const answersShuffled = shuffled(answers);
+        const isLegacy = answersShuffled.some(a => a && (typeof a.response === 'string'));
 
         if (isLegacy) {
           const bullets = [];
-          for (let i = 0; i < answers.length; i++) {
-            const ans = answers[i] || {};
+          for (let i = 0; i < answersShuffled.length; i++) {
+            const ans = answersShuffled[i] || {};
             const resp = String(ans.response || '').trim();
             if (resp) bullets.push(resp);
           }
@@ -289,7 +301,7 @@
             thoughts.push({
               id: 'ans-' + recId,
               type: 'text',
-              paragraphs: [String(answers.length) + ' model answers'],
+              paragraphs: [String(answersShuffled.length) + ' model answers'],
               bullets,
               createdAt: String(rec.created_at || ''),
               replyTo: qId,
@@ -307,8 +319,8 @@
         const summary = `${yesCount} voted yes, ${noCount} voted no.`;
         // Single consolidated answer bubble with summary + verdict bullets
         const bullets = [];
-        for (let i = 0; i < answers.length; i++) {
-          const ans = answers[i] || {};
+        for (let i = 0; i < answersShuffled.length; i++) {
+          const ans = answersShuffled[i] || {};
           const verdict = ans.verdict || {};
           const vVote = String(verdict.vote || '').toLowerCase();
           const raw = String(verdict.verdict || verdict.justification || '');

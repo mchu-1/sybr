@@ -3,16 +3,20 @@ import argparse
 import json
 import uuid
 import re
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from litellm import acompletion
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, BackgroundTasks, Form
+from fastapi.responses import PlainTextResponse, Response
+from twilio.request_validator import RequestValidator
+from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
 
 
 # --- Setup ---
@@ -33,6 +37,163 @@ app = FastAPI()
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz() -> str:
     return "ok"
+
+
+# --- Environment / Twilio ---
+
+ENV_MAP: Dict[str, str] = {k: v for k, v in (dotenv_values() or {}).items() if isinstance(k, str)}
+
+
+def _env(key: str, default: Optional[str] = None) -> Optional[str]:
+    val = ENV_MAP.get(key)
+    if val is None or str(val).strip() == "":
+        return os.getenv(key, default)
+    return str(val)
+
+
+TWILIO_ACCOUNT_SID: str = _env("TWILIO_ACCOUNT_SID", "") or ""
+TWILIO_AUTH_TOKEN: str = _env("TWILIO_AUTH_TOKEN", "") or ""
+TWILIO_FROM_NUMBER: str = _env("TWILIO_FROM_NUMBER", "") or ""
+TWILIO_WHITELIST: str = _env("TWILIO_WHITELIST", "") or ""
+FORUM_URL: str = _env("FORUM_URL", "https://thesybr.net") or "https://thesybr.net"
+TWILIO_VALIDATE: bool = str(_env("TWILIO_VALIDATE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+
+_twilio_client_singleton: Optional[Client] = None
+
+
+def _get_twilio_client() -> Client:
+    global _twilio_client_singleton
+    if _twilio_client_singleton is None:
+        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+            raise RuntimeError("Twilio credentials are not configured")
+        _twilio_client_singleton = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _twilio_client_singleton
+
+
+def _parse_whitelist(raw: str) -> List[str]:
+    if not raw:
+        return []
+    items = re.split(r"[,;\s]+", str(raw))
+    return [x.strip() for x in items if x and x.strip()]
+
+
+def _is_whitelisted_number(number: str) -> bool:
+    allowed = _parse_whitelist(TWILIO_WHITELIST)
+    if not allowed:
+        return False
+    if "*" in allowed:
+        return True
+    normalized = (number or "").strip()
+    return normalized in allowed
+
+
+def _validate_twilio_signature(request: Request, form_data: Dict[str, str]) -> bool:
+    if not TWILIO_VALIDATE:
+        return True
+    signature = request.headers.get("X-Twilio-Signature") or ""
+    if not signature or not TWILIO_AUTH_TOKEN:
+        return False
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    # Full URL as Twilio sees it
+    url = str(request.url)
+    try:
+        return bool(validator.validate(url, form_data, signature))
+    except Exception:
+        return False
+
+
+def _extract_majority_summary(record: Dict[str, Any]) -> str:
+    vote = record.get("vote", {}) or {}
+    yes = int(vote.get("for", 0) or 0)
+    no = int(vote.get("against", 0) or 0)
+    if yes > no:
+        majority = "YES"
+    elif no > yes:
+        majority = "NO"
+    else:
+        majority = "SPLIT"
+
+    # Try to craft a brief justification from the first majority verdict
+    brief = ""
+    answers = record.get("answers") or []
+    for ans in answers:
+        verdict = (ans or {}).get("verdict") or {}
+        v = str(verdict.get("vote", "")).lower()
+        if (majority == "YES" and v == "for") or (majority == "NO" and v == "against"):
+            raw = str(verdict.get("verdict") or verdict.get("justification") or "").strip()
+            if raw:
+                # Heuristic: second sentence or trimmed text up to 200 chars
+                m = re.findall(r"[^.!?]+[.!?]", raw)
+                if len(m) >= 2:
+                    brief = m[1].strip()
+                else:
+                    brief = raw[:200].strip()
+            break
+
+    summary = f"Majority: {majority}. YES: {yes}, NO: {no}."
+    if brief:
+        return f"{summary} Reason: {brief}"
+    return summary
+
+
+async def _process_and_reply(question: str, user_number: str) -> None:
+    try:
+        _ensure_forum_file()
+        record = await _debate_all_models(question)
+        _append_forum_record(record)
+        # Compose SMS body in compact format:
+        # Yes (X) No (Y)\nthesybr.net
+        vote = record.get("vote", {}) or {}
+        yes = int(vote.get("for", 0) or 0)
+        no = int(vote.get("against", 0) or 0)
+        domain = re.sub(r"^https?://", "", (FORUM_URL or "").strip()).split("/")[0] or "thesybr.net"
+        body = f"yes: {yes} no: {no}\n{domain}"
+        # Send SMS
+        client = _get_twilio_client()
+        if TWILIO_FROM_NUMBER:
+            client.messages.create(body=body, from_=TWILIO_FROM_NUMBER, to=user_number)
+    except Exception as e:
+        try:
+            client = _get_twilio_client()
+            fallback = f"sybr — error answering your question: {type(e).__name__}. Please try again later."
+            if TWILIO_FROM_NUMBER:
+                client.messages.create(body=fallback, from_=TWILIO_FROM_NUMBER, to=user_number)
+        except Exception:
+            # Swallow secondary failures
+            pass
+
+
+@app.post("/sms")
+async def sms_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    from_number: str = Form("", alias="From"),
+    body: str = Form("", alias="Body"),
+    to_number: str = Form("", alias="To"),
+) -> Response:
+    # Validate signature if enabled
+    form = await request.form()
+    form_map: Dict[str, str] = {k: str(v) for k, v in dict(form).items()}
+    if not _validate_twilio_signature(request, form_map):
+        return Response(content="", status_code=403)
+
+    # Whitelist check
+    if not _is_whitelisted_number(from_number):
+        resp = MessagingResponse()
+        resp.message("This number is not approved to use sybr.")
+        return Response(content=str(resp), media_type="application/xml")
+
+    question = (body or "").strip()
+    if not question:
+        resp = MessagingResponse()
+        resp.message("Please send a non-empty question.")
+        return Response(content=str(resp), media_type="application/xml")
+
+    # Queue background processing and immediately acknowledge receipt
+    background_tasks.add_task(_process_and_reply, question, from_number)
+    resp = MessagingResponse()
+    resp.message("Question received. We will text you the answer shortly.")
+    return Response(content=str(resp), media_type="application/xml")
 
 
 # --- Config ---
