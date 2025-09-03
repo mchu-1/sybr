@@ -50,11 +50,11 @@ def _env(key: str, default: Optional[str] = None) -> Optional[str]:
     return str(val)
 
 
-TWILIO_ACCOUNT_SID: str = _env("TWILIO_ACCOUNT_SID", "") or ""
-TWILIO_AUTH_TOKEN: str = _env("TWILIO_AUTH_TOKEN", "") or ""
-TWILIO_FROM_NUMBER: str = _env("TWILIO_FROM_NUMBER", "") or ""
-TWILIO_WHITELIST: str = _env("TWILIO_WHITELIST", "") or ""
-FORUM_URL: str = _env("FORUM_URL", "https://thesybr.net") or "https://thesybr.net"
+TWILIO_ACCOUNT_SID: str = _env("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN: str = _env("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM_NUMBER: str = _env("TWILIO_FROM_NUMBER", "")
+TWILIO_WHITELIST: str = _env("TWILIO_WHITELIST", "")
+FORUM_URL: str = _env("FORUM_URL", "https://thesybr.net")
 TWILIO_VALIDATE: bool = str(_env("TWILIO_VALIDATE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
 
 _twilio_client_singleton: Optional[Client] = None
