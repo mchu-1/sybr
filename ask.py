@@ -519,8 +519,9 @@ async def _debate_all_models(question: str) -> Dict[str, Any]:
     parsed_verdicts: List[Dict[str, Any]] = []
     for v in verdict_results:
         raw = (v.get("response") or "").strip()
-        vote_val = "against"  # default to a concrete side to satisfy YES/NO requirement
-        justification_val = raw
+        # Default to explicit error classification instead of assuming NO/against
+        vote_val = "error"
+        justification_val = ""
         # First, try to parse as the new soft sentence: "Yes. Reason." or "No. Reason."
         m_soft = re.match(r"^\s*(yes|no)[\s\t]*\.[\s\t]*(.+?)\.?\s*$", raw, flags=re.IGNORECASE | re.DOTALL)
         if m_soft:
@@ -536,23 +537,37 @@ async def _debate_all_models(question: str) -> Dict[str, Any]:
                     vote_val = "for" if vote_raw == "yes" else "against"
                 elif vote_raw in {"for", "against"}:
                     vote_val = vote_raw
+                elif vote_raw in {"err", "error"}:
+                    vote_val = "error"
+                # Prefer provided justification
                 justification_val = str(data.get("verdict", "") or data.get("justification", "")).strip() or justification_val
             except Exception:
                 # Heuristic fallback: look for keywords
                 txt = raw.lower()
+                # If the model clearly emitted an error marker, classify as error
+                if re.search(r"\[error\]|\berror\b", txt):
+                    vote_val = "error"
+                    justification_val = ""
+                else:
                 # Try to extract an inline vote field even if extra text surrounds JSON
-                m = re.search(r'"vote"\s*:\s*"(yes|no|for|against)"', raw, flags=re.IGNORECASE)
-                if m:
-                    val = m.group(1).lower()
-                    vote_val = "for" if val in {"yes", "for"} else "against"
-                elif re.search(r'\byes\b|\baffirmative\b', txt):
-                    vote_val = "for"
-                elif re.search(r'\bno\b|\bnegative\b', txt):
-                    vote_val = "against"
-                elif re.search(r'\bfor\b', txt) and not re.search(r'\bagainst\b', txt):
-                    vote_val = "for"
-                elif re.search(r'\bagainst\b', txt) and not re.search(r'\bfor\b', txt):
-                    vote_val = "against"
+                    m = re.search(r'"vote"\s*:\s*"(yes|no|for|against|err|error)"', raw, flags=re.IGNORECASE)
+                    if m:
+                        val = m.group(1).lower()
+                        if val in {"yes", "for"}:
+                            vote_val = "for"
+                        elif val in {"no", "against"}:
+                            vote_val = "against"
+                        else:
+                            vote_val = "error"
+                            justification_val = ""
+                    elif re.search(r'\byes\b|\baffirmative\b', txt):
+                        vote_val = "for"
+                    elif re.search(r'\bno\b|\bnegative\b', txt):
+                        vote_val = "against"
+                    elif re.search(r'\bfor\b', txt) and not re.search(r'\bagainst\b', txt):
+                        vote_val = "for"
+                    elif re.search(r'\bagainst\b', txt) and not re.search(r'\bfor\b', txt):
+                        vote_val = "against"
 
         if vote_val == "for":
             votes_for += 1
@@ -576,10 +591,12 @@ async def _debate_all_models(question: str) -> Dict[str, Any]:
         if v is None or not v.get("verdict"):
             raise RuntimeError(f"Missing adjudicator verdict for model: {m}")
         verdict_obj = v.get("verdict")
-        # Basic validation: ensure required keys are present and vote is valid
+        # Basic validation: allow explicit error verdicts with minimal message
         vote_val = str(verdict_obj.get("vote", "")).lower()
         reason_val = str(verdict_obj.get("verdict", "")).strip()
-        if vote_val not in {"for", "against"} or not reason_val:
+        if vote_val not in {"for", "against", "error"}:
+            raise RuntimeError(f"Invalid adjudicator verdict for model {m}: {verdict_obj}")
+        if vote_val in {"for", "against"} and not reason_val:
             raise RuntimeError(f"Invalid adjudicator verdict for model {m}: {verdict_obj}")
 
         answers.append({

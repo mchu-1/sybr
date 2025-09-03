@@ -353,8 +353,17 @@
           const vVote = String(verdict.vote || '').toLowerCase();
           const raw = String(verdict.verdict || verdict.justification || '');
           const bulletText = (secondSentenceFrom(raw) || raw).trim();
-          const prefix = (vVote === 'for') ? 'YES: ' : (vVote === 'against') ? 'NO: ' : '';
-          if (bulletText) bullets.push((prefix + bulletText).trim());
+          let prefix = '';
+          if (vVote === 'for') prefix = 'YES: ';
+          else if (vVote === 'against') prefix = 'NO: ';
+          else if (vVote === 'error') prefix = 'ERR: ';
+
+          if (vVote === 'error') {
+            // Always show an error marker even if message is empty
+            bullets.push(prefix + (bulletText ? bulletText : ''));
+          } else if (bulletText) {
+            bullets.push((prefix + bulletText).trim());
+          }
         }
         thoughts.push({
           id: answerRootId,
