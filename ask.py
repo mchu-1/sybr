@@ -16,7 +16,6 @@ from fastapi import FastAPI, Request, BackgroundTasks, Form
 from fastapi.responses import PlainTextResponse, Response
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
-from twilio.twiml.messaging_response import MessagingResponse
 
 
 # --- Setup ---
@@ -179,21 +178,15 @@ async def sms_webhook(
 
     # Whitelist check
     if not _is_whitelisted_number(from_number):
-        resp = MessagingResponse()
-        resp.message("This number is not approved to use sybr.")
-        return Response(content=str(resp), media_type="application/xml")
+        return Response(content="", status_code=204)
 
     question = (body or "").strip()
     if not question:
-        resp = MessagingResponse()
-        resp.message("Please send a non-empty question.")
-        return Response(content=str(resp), media_type="application/xml")
+        return Response(content="", status_code=204)
 
-    # Queue background processing and immediately acknowledge receipt
+    # Queue background processing and return no content (no auto-reply)
     background_tasks.add_task(_process_and_reply, question, from_number)
-    resp = MessagingResponse()
-    resp.message("Question received. We will text you the answer shortly.")
-    return Response(content=str(resp), media_type="application/xml")
+    return Response(content="", status_code=204)
 
 
 # --- Config ---

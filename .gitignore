@@ -4,5 +4,6 @@ uvicorn.log
 pyproject.toml
 .env
 test.py
+ask.py
 response.json
 wrangler.toml
