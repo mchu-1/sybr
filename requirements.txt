@@ -5,3 +5,4 @@ litellm==1.76.1
 PyYAML==6.0.2
 python-dotenv==1.0.1
 twilio==8.13.0
+redis==5.0.7
