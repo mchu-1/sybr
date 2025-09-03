@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, Form
 from fastapi.responses import PlainTextResponse, Response
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 
 
 # --- Setup ---
@@ -31,6 +32,7 @@ VERDICT_PROMPT_PATH: Path = PROJECT_ROOT / "verdict.md"
 
 # --- FastAPI (consolidated server) ---
 app = FastAPI()
+app.add_middleware(ProxyHeadersMiddleware)
 
 
 @app.get("/healthz", response_class=PlainTextResponse)

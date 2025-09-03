@@ -1,3 +1,0 @@
-# Redirect www to apex
-https://www.thesybr.net/* https://thesybr.net/:splat 301!
-
